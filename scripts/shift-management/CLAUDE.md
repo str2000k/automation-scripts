@@ -91,6 +91,8 @@ scripts/shift-management/
 ├── notify_shift.py        # Slack/LINE配信 (outbox連携)
 ├── calendar_sync.py       # Google Calendar同期 (outbox連携)
 ├── kintone_shift_register.py  # kintone確定登録 (outbox連携)
+├── mf_kintai_sync.py      # MFクラウド勤怠同期 (STEP E)
+├── reminder.py            # シフト開始リマインド (STEP F)
 ├── test_integration.py    # 統合テスト
 └── test_e2e.py            # E2Eテスト (STEP G)
 ```

@@ -6,7 +6,7 @@ Executes pending destinations for a schedule_version:
   2. slack - channel announcement + individual DMs
   3. line - individual notifications
   4. calendar - Google Calendar sync
-  5. mf_kintai - MF Cloud attendance (not yet implemented)
+  5. mf_kintai - MF Cloud attendance sync
 
 Usage:
     python3 run_post_approval.py                    # Use latest version
@@ -36,9 +36,8 @@ def run_destination(version, dest):
             import calendar_sync
             calendar_sync.run(dry_run=False, schedule_version=version)
         elif dest == "mf_kintai":
-            print("  [SKIP] MF Cloud attendance sync not yet implemented")
-            sync_outbox.update_status(version, "mf_kintai", "pending",
-                                      "Not implemented yet")
+            import mf_kintai_sync
+            mf_kintai_sync.run(dry_run=False, schedule_version=version)
     except Exception as e:
         print(f"  [ERROR] {dest}: {e}")
 

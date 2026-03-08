@@ -36,6 +36,7 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # --- MF Cloud Attendance ---
+MF_ACCESS_TOKEN = os.environ.get("MF_ACCESS_TOKEN", "")
 MF_CLIENT_ID = os.environ.get("MF_CLIENT_ID", "")
 MF_CLIENT_SECRET = os.environ.get("MF_CLIENT_SECRET", "")
 
