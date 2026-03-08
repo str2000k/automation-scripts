@@ -1,0 +1,4 @@
+.env
+staff_master_cache.json
+collection_state.json
+sync_outbox.json
