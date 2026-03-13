@@ -85,7 +85,8 @@ def _get_access_token(cred_path):
         cred["token"] = new_token
         cred["access_token"] = new_token
         expires_in = result.get("expires_in", 3600)
-        new_expiry = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat() + "Z"
+        import datetime as dt_mod
+        new_expiry = (datetime.now(dt_mod.timezone.utc) + timedelta(seconds=expires_in)).isoformat()
         cred["expiry"] = new_expiry
         cred["token_expiry"] = new_expiry
         with open(cred_path, "w") as f:
@@ -258,17 +259,17 @@ def read_shift_output():
     # Row 4: schedule_version
     schedule_version = rows[3][1] if len(rows) > 3 and len(rows[3]) > 1 else ""
 
-    # Row 5 (index 4): date headers (A5=staff_id, B5=スタッフ名, C5+=dates)
-    header_row = rows[4]
+    # Row 6 (index 5): date headers (A6=staff_id, B6=スタッフ名, C6+=dates)
+    header_row = rows[5]
     dates = []
     for cell in header_row[2:]:  # skip staff_id and name columns
         date_part = cell.split("\n")[0].strip() if cell else ""
         if date_part and len(date_part) == 10:
             dates.append(date_part)
 
-    # Row 6+ (index 5+): staff data
+    # Row 7+ (index 6+): staff data
     staff_schedule = []
-    for row in rows[5:]:
+    for row in rows[6:]:
         if not row or not row[0]:
             continue
         staff_id = row[0]
@@ -290,8 +291,8 @@ def read_shift_output():
 
 
 def read_staff_roles():
-    """Read staff master to get role/skill info. Returns {staff_id: role}."""
-    rows = sheets_read("スタッフマスタ!A1:I100")
+    """Read staff master to get role info. Returns {staff_id: role}."""
+    rows = sheets_read("スタッフマスタ!A1:L100")
     if not rows:
         return {}
 
@@ -307,7 +308,7 @@ def read_staff_roles():
         if d.get("有効フラグ", "").upper() in ("FALSE", "0", "無効"):
             continue
         staff_id = d.get("staff_id", "")
-        role = d.get("役割・スキル", "")
+        role = d.get("役職", "")
         if staff_id:
             roles[staff_id] = role
 

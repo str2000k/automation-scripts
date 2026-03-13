@@ -63,45 +63,51 @@ def _kintone_headers():
 def fetch_shift_from_kintone(schedule_version):
     """Fetch confirmed shift records from kintone ID=212.
 
-    Returns list of dicts: {staff_id, staff_name, working_days, shift_period}
+    New schema: 1 record per staff per day.
+    Groups by staff_id and collects working days (shift_status=出勤).
+
+    Returns list of dicts: {staff_id, staff_name, working_days, period_start, period_end}
     """
     headers = _kintone_headers()
-    query = f'schedule_version = "{schedule_version}" order by staff_id asc'
-    encoded_query = urllib.parse.quote(query)
-    url = (
-        f"https://{KINTONE_DOMAIN}/k/v1/records.json"
-        f"?app={KINTONE_SHIFT_CONFIRMED_APP_ID}"
-        f"&query={encoded_query}&totalCount=true"
-    )
-    req = urllib.request.Request(url, headers=headers)
+    query = f'schedule_version = "{schedule_version}" order by staff_id asc, shift_date asc'
+    body = {
+        "app": KINTONE_SHIFT_CONFIRMED_APP_ID,
+        "query": query,
+        "totalCount": True,
+    }
+    url = f"https://{KINTONE_DOMAIN}/k/v1/records.json"
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers=headers, method="GET")
     with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read())
+        result_data = json.loads(resp.read())
 
-    records = data.get("records", [])
+    records = result_data.get("records", [])
     if not records:
         raise RuntimeError(
             f"No confirmed shift records found for version: {schedule_version}"
         )
 
-    result = []
+    # Group by staff_id
+    staff_map = {}
     for r in records:
         staff_id = r.get("staff_id", {}).get("value", "")
-        staff_name = r.get("staff_name", {}).get("value", "")
-        working_days_str = r.get("working_days", {}).get("value", "")
-        shift_period = r.get("shift_period", {}).get("value", "")
+        if not staff_id:
+            continue
+        if staff_id not in staff_map:
+            staff_map[staff_id] = {
+                "staff_id": staff_id,
+                "staff_name": r.get("staff_name", {}).get("value", ""),
+                "working_days": [],
+                "period_start": r.get("period_start", {}).get("value", ""),
+                "period_end": r.get("period_end", {}).get("value", ""),
+            }
+        shift_status = r.get("shift_status", {}).get("value", "")
+        shift_date = r.get("shift_date", {}).get("value", "")
+        if shift_status == "出勤" and shift_date:
+            staff_map[staff_id]["working_days"].append(shift_date)
 
-        working_days = [
-            d.strip() for d in working_days_str.split(",") if d.strip()
-        ]
-
-        result.append({
-            "staff_id": staff_id,
-            "staff_name": staff_name,
-            "working_days": working_days,
-            "shift_period": shift_period,
-        })
-
-    print(f"  Fetched {len(result)} staff records from kintone")
+    result = list(staff_map.values())
+    print(f"  Fetched {len(records)} records -> {len(result)} staff from kintone")
     return result
 
 
