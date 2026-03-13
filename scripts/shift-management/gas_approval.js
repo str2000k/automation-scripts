@@ -1,5 +1,5 @@
 /**
- * STEP 7: GAS Approval Button for Shift Management
+ * STEP 7: GAS Approval System for Shift Management (3-Button)
  *
  * Deploy this as a container-bound Apps Script in spreadsheet:
  *   1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU
@@ -18,7 +18,9 @@
  *   A2: "承認者"            B2: (auto-filled on approval)
  *   A3: "承認日時"          B3: (auto-filled on approval)
  *   A4: "schedule_version"  B4: (auto-filled on approval, e.g. "2026-03-09_v1")
- *   Row 5: (empty)  Row 6: headers  Row 7+: shift data
+ *   A5: "承認ステータス"    B5: (承認済 / 一時保留 / 差し戻し: reason)
+ *   Row 6: headers
+ *   Row 7+: shift data
  */
 
 var SPREADSHEET_ID = '1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU';
@@ -35,17 +37,19 @@ function onOpen() {
   var ui = SpreadsheetApp.getUi();
   ui.createMenu('シフト管理')
     .addItem('シフト生成', 'onGenerateShift')
-    .addItem('承認する', 'onApproveShift')
+    .addSeparator()
+    .addItem('承認する', 'approveShift')
+    .addItem('一時保留', 'holdShift')
+    .addItem('差し戻す', 'rejectShift')
     .addSeparator()
     .addItem('ボタン配置 (初回のみ)', 'setupButtons')
     .addToUi();
 }
 
 /**
- * Create drawing buttons on the sheet (run once).
- * Note: GAS cannot programmatically create drawings/buttons,
- * so this sets up labels in cells instead. For actual button drawings,
- * manually insert shapes via Insert -> Drawing and assign functions.
+ * Create button-like cells on the sheet (run once).
+ * For actual button drawings, manually insert shapes via Insert -> Drawing
+ * and assign the corresponding function names.
  */
 function setupButtons() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -56,39 +60,56 @@ function setupButtons() {
     return;
   }
 
-  // Ensure rows 2-3 have labels
+  // Ensure metadata rows have labels
+  sheet.getRange('A1').setValue('シフト期間');
   sheet.getRange('A2').setValue('承認者');
   sheet.getRange('A3').setValue('承認日時');
-
-  // Add instruction in row 4
-  sheet.getRange('A4').setValue('');
+  sheet.getRange('A4').setValue('schedule_version');
+  sheet.getRange('A5').setValue('承認ステータス');
 
   // Format label cells
-  sheet.getRange('A1:A3').setFontWeight('bold');
+  sheet.getRange('A1:A5').setFontWeight('bold');
 
-  // Create button-like cells in R2 and R3
-  var btnGenerate = sheet.getRange('R2');
-  btnGenerate.setValue('シフト生成');
-  btnGenerate.setBackground('#4285F4');
-  btnGenerate.setFontColor('#FFFFFF');
-  btnGenerate.setFontWeight('bold');
-  btnGenerate.setHorizontalAlignment('center');
-  btnGenerate.setNote('メニュー「シフト管理」→「シフト生成」を実行してください');
+  // --- Button-like cells in column R ---
 
-  var btnApprove = sheet.getRange('R3');
+  // R2: 承認する (green)
+  var btnApprove = sheet.getRange('R2');
   btnApprove.setValue('承認する');
   btnApprove.setBackground('#34A853');
   btnApprove.setFontColor('#FFFFFF');
   btnApprove.setFontWeight('bold');
   btnApprove.setHorizontalAlignment('center');
-  btnApprove.setNote('メニュー「シフト管理」→「承認する」を実行してください');
+  btnApprove.setNote('メニュー「シフト管理」→「承認する」を実行、または図形ボタンに approveShift を割り当て');
+
+  // R3: 一時保留 (yellow)
+  var btnHold = sheet.getRange('R3');
+  btnHold.setValue('一時保留');
+  btnHold.setBackground('#F4B400');
+  btnHold.setFontColor('#FFFFFF');
+  btnHold.setFontWeight('bold');
+  btnHold.setHorizontalAlignment('center');
+  btnHold.setNote('メニュー「シフト管理」→「一時保留」を実行、または図形ボタンに holdShift を割り当て');
+
+  // R4: 差し戻す (red)
+  var btnReject = sheet.getRange('R4');
+  btnReject.setValue('差し戻す');
+  btnReject.setBackground('#DB4437');
+  btnReject.setFontColor('#FFFFFF');
+  btnReject.setFontWeight('bold');
+  btnReject.setHorizontalAlignment('center');
+  btnReject.setNote('メニュー「シフト管理」→「差し戻す」を実行、または図形ボタンに rejectShift を割り当て');
 
   SpreadsheetApp.getUi().alert(
     'ボタンを配置しました。\n\n' +
+    'R2: 承認する (緑)\n' +
+    'R3: 一時保留 (黄)\n' +
+    'R4: 差し戻す (赤)\n\n' +
     '図形ボタンを使う場合:\n' +
-    '1. 挿入 → 図形描画 で「シフト生成」ボタンを作成\n' +
-    '2. 右クリック → スクリプトを割り当て → onGenerateShift\n' +
-    '3. 同様に「承認する」ボタン → onApproveShift\n\n' +
+    '1. 挿入 → 図形描画 でボタンを作成\n' +
+    '2. 右クリック → スクリプトを割り当て:\n' +
+    '   - 承認 → approveShift\n' +
+    '   - 保留 → holdShift\n' +
+    '   - 差し戻し → rejectShift\n\n' +
     'またはメニュー「シフト管理」からも実行できます。'
   );
 }
@@ -120,9 +141,11 @@ function onGenerateShift() {
     return;
   }
 
-  // Clear approval if re-generating
+  // Clear approval fields if re-generating
   sheet.getRange('B2').setValue('');
   sheet.getRange('B3').setValue('');
+  sheet.getRange('B4').setValue('');
+  sheet.getRange('B5').setValue('');
 
   // Try calling external script if URL is configured
   var props = PropertiesService.getScriptProperties();
@@ -156,11 +179,12 @@ function onGenerateShift() {
 
 /**
  * Approve the current shift schedule.
- * - Writes approver email and timestamp to B2:B3
+ * - Writes approver email, timestamp, schedule_version to B2:B4
+ * - Writes 承認ステータス = 承認済 to A5:B5
  * - Protects the shift data range
  * - Triggers notification (STEP 8)
  */
-function onApproveShift() {
+function approveShift() {
   var ui = SpreadsheetApp.getUi();
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
 
@@ -182,9 +206,9 @@ function onApproveShift() {
     var reapprove = ui.alert(
       '再承認確認',
       '既に ' + existingApprover + ' により承認済みです。\n再承認しますか？',
-      ui.ButtonSet.OK_CANCEL
+      ui.ButtonSet.YES_NO
     );
-    if (reapprove !== ui.Button.OK) return;
+    if (reapprove !== ui.Button.YES) return;
   }
 
   // Confirmation dialog
@@ -196,10 +220,10 @@ function onApproveShift() {
     '- シフトデータがロックされます\n' +
     '- 全スタッフにSlack/LINEで通知されます\n' +
     '- kintoneに確定シフトが登録されます',
-    ui.ButtonSet.OK_CANCEL
+    ui.ButtonSet.YES_NO
   );
 
-  if (confirm !== ui.Button.OK) return;
+  if (confirm !== ui.Button.YES) return;
 
   // Write approval info
   var approverEmail = Session.getActiveUser().getEmail();
@@ -210,17 +234,22 @@ function onApproveShift() {
   );
 
   // Generate schedule_version
-  var periodStart = String(period).split('~')[0].trim(); // "2026-03-09"
+  var periodStart = String(period).split('~')[0].trim();
   var scheduleVersion = generateScheduleVersion_(periodStart);
 
+  sheet.getRange('A2').setValue('承認者');
   sheet.getRange('B2').setValue(approverEmail);
+  sheet.getRange('A3').setValue('承認日時');
   sheet.getRange('B3').setValue(approvalTime);
   sheet.getRange('A4').setValue('schedule_version');
   sheet.getRange('B4').setValue(scheduleVersion);
+  sheet.getRange('A5').setValue('承認ステータス');
+  sheet.getRange('B5').setValue('承認済');
 
   // Format approval cells
   sheet.getRange('B2:B4').setFontWeight('bold');
   sheet.getRange('B2').setFontColor('#34A853');
+  sheet.getRange('B5').setFontWeight('bold').setFontColor('#34A853');
 
   // Protect shift data range
   protectShiftData_(sheet);
@@ -240,6 +269,160 @@ function onApproveShift() {
 }
 
 // ---------------------------------------------------------------------------
+// Hold Shift
+// ---------------------------------------------------------------------------
+
+/**
+ * Put the shift on hold (一時保留).
+ * - Writes 承認ステータス = 一時保留 to A5:B5
+ * - Does NOT protect the sheet (allows further editing)
+ */
+function holdShift() {
+  var ui = SpreadsheetApp.getUi();
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    ui.alert('シフト出力シートが見つかりません');
+    return;
+  }
+
+  var period = sheet.getRange('B1').getValue();
+  if (!period) {
+    ui.alert('シフトデータがありません。先にシフト生成を実行してください。');
+    return;
+  }
+
+  sheet.getRange('A5').setValue('承認ステータス');
+  sheet.getRange('B5').setValue('一時保留');
+  sheet.getRange('B5').setFontWeight('bold').setFontColor('#F4B400');
+
+  ui.alert('一時保留にしました。修正後に再度承認してください。');
+}
+
+// ---------------------------------------------------------------------------
+// Reject Shift
+// ---------------------------------------------------------------------------
+
+/**
+ * Reject the shift (差し戻し).
+ * - Prompts for rejection reason
+ * - Writes 承認ステータス = 差し戻し: <reason> to A5:B5
+ * - Notifies Slack #shift-management
+ */
+function rejectShift() {
+  var ui = SpreadsheetApp.getUi();
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    ui.alert('シフト出力シートが見つかりません');
+    return;
+  }
+
+  var period = sheet.getRange('B1').getValue();
+  if (!period) {
+    ui.alert('シフトデータがありません。先にシフト生成を実行してください。');
+    return;
+  }
+
+  // Prompt for rejection reason
+  var response = ui.prompt(
+    'シフト差し戻し',
+    '差し戻し理由を入力してください:',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  var reason = response.getResponseText().trim();
+  if (!reason) {
+    ui.alert('差し戻し理由を入力してください。');
+    return;
+  }
+
+  var rejector = Session.getActiveUser().getEmail();
+
+  sheet.getRange('A5').setValue('承認ステータス');
+  sheet.getRange('B5').setValue('差し戻し: ' + reason);
+  sheet.getRange('B5').setFontWeight('bold').setFontColor('#DB4437');
+
+  // Clear any previous approval info
+  sheet.getRange('B2').setValue('');
+  sheet.getRange('B3').setValue('');
+  sheet.getRange('B4').setValue('');
+
+  // Notify Slack
+  notifyRejection_(period, rejector, reason);
+
+  ui.alert('差し戻しました。Slackに通知しました。');
+}
+
+// ---------------------------------------------------------------------------
+// Rejection Slack Notification
+// ---------------------------------------------------------------------------
+
+/**
+ * Post a Block Kit message to Slack about the shift rejection.
+ */
+function notifyRejection_(period, rejector, reason) {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('SLACK_BOT_TOKEN');
+  var channel = props.getProperty('SLACK_SHIFT_CHANNEL') || '#shift-management';
+
+  if (!token) return;
+
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+
+  var blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: 'シフト差し戻し通知',
+        emoji: true,
+      },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: '*対象期間:*\n' + period },
+        { type: 'mrkdwn', text: '*差し戻し者:*\n' + rejector },
+      ],
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*差し戻し理由:*\n' + reason,
+      },
+    },
+    {
+      type: 'context',
+      elements: [
+        { type: 'mrkdwn', text: now + ' | シフト管理システム' },
+      ],
+    },
+  ];
+
+  var fallbackText = 'シフト差し戻し: ' + period + ' 理由: ' + reason + ' (' + rejector + ')';
+
+  try {
+    UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + token },
+      payload: JSON.stringify({
+        channel: channel,
+        text: fallbackText,
+        blocks: blocks,
+      }),
+      muteHttpExceptions: true,
+    });
+  } catch (e) {
+    Logger.log('Slack rejection notification failed: ' + e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Protection
 // ---------------------------------------------------------------------------
 
@@ -250,7 +433,7 @@ function protectShiftData_(sheet) {
   var lastRow = sheet.getLastRow();
   var lastCol = sheet.getLastColumn();
 
-  if (lastRow < 6) return; // No data rows
+  if (lastRow < 7) return; // No data rows (headers at row 6, data at row 7+)
 
   // Protect rows 1-lastRow (entire shift output)
   var range = sheet.getRange(1, 1, lastRow, lastCol);
@@ -326,17 +509,18 @@ function triggerPostApproval_(sheet, period, approverEmail, scheduleVersion) {
 
 /**
  * Collect shift data from the sheet for notifications.
+ * Layout: Row 6 = headers, Row 7+ = data
  */
 function collectShiftData_(sheet) {
   var lastRow = sheet.getLastRow();
-  if (lastRow < 6) return [];
+  if (lastRow < 7) return [];
 
-  // Read header (row 5) and data (rows 6+)
-  // A5=staff_id, B5=スタッフ名, C5~P5=dates, Q5=出勤日数, R5=合計勤務時間
-  var headers = sheet.getRange(5, 3, 1, 14).getValues()[0]; // C5:P5 = dates
+  // Read header (row 6) and data (rows 7+)
+  // A6=staff_id, B6=スタッフ名, C6~P6=dates, Q6=出勤日数, R6=合計勤務時間
+  var headers = sheet.getRange(6, 3, 1, 14).getValues()[0]; // C6:P6 = dates
   var data = [];
 
-  for (var r = 6; r <= lastRow; r++) {
+  for (var r = 7; r <= lastRow; r++) {
     var row = sheet.getRange(r, 1, 1, 18).getValues()[0]; // A:R
     var staffId = row[0];
     var name = row[1];
@@ -347,7 +531,7 @@ function collectShiftData_(sheet) {
     var wishOffDays = [];
 
     for (var d = 0; d < 14; d++) {
-      var dateLabel = String(headers[d]).split('\n')[0]; // "2026-03-09"
+      var dateLabel = String(headers[d]).split('\n')[0];
       var status = row[d + 2]; // C~P columns
 
       if (status === '出勤') {

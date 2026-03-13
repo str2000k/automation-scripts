@@ -19,6 +19,7 @@ KINTONE_PASSWORD = os.environ.get("KINTONE_PASSWORD", "")
 # App IDs (set after creation)
 KINTONE_SHIFT_WISH_APP_ID = int(os.environ.get("KINTONE_SHIFT_WISH_APP_ID", "0"))
 KINTONE_SHIFT_CONFIRMED_APP_ID = int(os.environ.get("KINTONE_SHIFT_CONFIRMED_APP_ID", "0"))
+KINTONE_STAFF_MASTER_APP_ID = int(os.environ.get("KINTONE_STAFF_MASTER_APP_ID", "0"))
 
 # --- Google Spreadsheet ---
 SHIFT_SPREADSHEET_ID = os.environ.get("SHIFT_SPREADSHEET_ID", "")
@@ -26,7 +27,9 @@ SHIFT_SPREADSHEET_ID = os.environ.get("SHIFT_SPREADSHEET_ID", "")
 # --- Slack ---
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
+BOLT_PORT = int(os.environ.get("BOLT_PORT", 3000))
 SLACK_SHIFT_CHANNEL = os.environ.get("SLACK_SHIFT_CHANNEL", "#shift-management")
+SLACK_ADMIN_ID = os.environ.get("SLACK_ADMIN_ID", "U07UBN61QFN")
 
 # --- LINE Messaging API ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")

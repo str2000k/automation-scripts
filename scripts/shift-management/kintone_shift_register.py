@@ -209,8 +209,9 @@ def slack_notify_error(location, error):
 def read_shift_output():
     """Read approved shift data from 'シフト出力' sheet.
 
-    Returns (period_str, approver, approved_at, dates, staff_data).
-    staff_data: list of {"name", "working_days": [dates], "off_days": [dates]}
+    Returns (period_start, period_end, approver, approved_at, schedule_version,
+             dates, staff_data).
+    staff_data: list of {"staff_id", "name", "days": [{date, status}]}
     """
     rows = sheets_read("シフト出力!A1:R100")
     if len(rows) < 6:
@@ -228,6 +229,11 @@ def read_shift_output():
     if not approver:
         raise RuntimeError("シフトが未承認です。先に承認してください。")
 
+    # Parse period_start / period_end from period_str
+    period_parts = period_str.split("~")
+    period_start = period_parts[0].strip() if len(period_parts) >= 1 else ""
+    period_end = period_parts[1].strip() if len(period_parts) >= 2 else ""
+
     # Row 5 (index 4): date headers (A5=staff_id, B5=スタッフ名, C5+=dates)
     header_row = rows[4]
     dates = []
@@ -236,67 +242,67 @@ def read_shift_output():
         if date_part and len(date_part) == 10:
             dates.append(date_part)
 
-    # Row 6+ (index 5+): staff data
+    # Row 6+ (index 5+): staff data with per-day breakdown
     staff_data = []
     for row in rows[5:]:
         if not row or not row[0]:
             continue
         staff_id = row[0]
         name = row[1] if len(row) > 1 else ""
-        working_days = []
-        off_days = []
+        days = []
         for i, date in enumerate(dates):
-            col_idx = i + 2  # shifted by staff_id + name columns
+            col_idx = i + 2
             status = row[col_idx] if col_idx < len(row) else "休み"
-            if status == "出勤":
-                working_days.append(date)
-            else:
-                off_days.append(date)
+            days.append({"date": date, "status": status})
 
         staff_data.append({
             "staff_id": staff_id,
             "name": name,
-            "working_days": working_days,
-            "off_days": off_days,
+            "days": days,
         })
 
-    print(f"  Period: {period_str}")
+    print(f"  Period: {period_start} ~ {period_end}")
     print(f"  Approver: {approver}")
-    print(f"  Staff: {len(staff_data)} members")
+    print(f"  Staff: {len(staff_data)} members, {len(dates)} days")
 
-    return period_str, approver, approved_at, schedule_version, dates, staff_data
+    return period_start, period_end, approver, approved_at, schedule_version, dates, staff_data
 
 
 # ---------------------------------------------------------------------------
 # kintone registration logic
 # ---------------------------------------------------------------------------
 
-def fetch_existing_records(period_str):
-    """Fetch existing records for the same period. Returns {staff_id: record_id}."""
-    query = f'shift_period = "{period_str}" order by staff_name asc'
+def fetch_existing_records(period_start, period_end):
+    """Fetch existing records for the same period. Returns {(staff_id, shift_date): record_id}."""
+    query = (
+        f'period_start = "{period_start}" and period_end = "{period_end}" '
+        f'order by staff_id asc, shift_date asc'
+    )
     result = kintone_get_records(query)
     records = result.get("records", [])
 
     existing = {}
     for r in records:
         sid = r.get("staff_id", {}).get("value", "")
-        if not sid:
-            sid = r["staff_name"]["value"]  # fallback for legacy records
+        shift_date = r.get("shift_date", {}).get("value", "")
         record_id = r["$id"]["value"]
-        existing[sid] = record_id
+        if sid and shift_date:
+            existing[(sid, shift_date)] = record_id
 
     print(f"  Existing records for this period: {len(existing)}")
     return existing
 
 
-def build_kintone_record(staff, period_str, approver, approved_at, schedule_version=""):
-    """Build a kintone record body for one staff member."""
+def build_kintone_record_per_day(staff_id, staff_name, day_info, period_start,
+                                  period_end, approver, approved_at, schedule_version=""):
+    """Build a kintone record body for one staff x one day."""
     record = {
-        "shift_period": {"value": period_str},
-        "staff_id": {"value": staff.get("staff_id", "")},
-        "staff_name": {"value": staff["name"]},
-        "working_days": {"value": ", ".join(staff["working_days"])},
-        "off_days": {"value": ", ".join(staff["off_days"])},
+        "staff_id": {"value": staff_id},
+        "staff_name": {"value": staff_name},
+        "shift_date": {"value": day_info["date"]},
+        "shift_status": {"value": day_info["status"]},
+        "period_start": {"value": period_start},
+        "period_end": {"value": period_end},
         "confirmed_by": {"value": approver},
         "confirmed_at": {"value": approved_at},
     }
@@ -305,45 +311,58 @@ def build_kintone_record(staff, period_str, approver, approved_at, schedule_vers
     return record
 
 
-def register_to_kintone(staff_data, period_str, approver, approved_at,
+def register_to_kintone(staff_data, period_start, period_end, approver, approved_at,
                         schedule_version="", dry_run=False):
-    """Register or update confirmed shift records in kintone."""
-    existing = fetch_existing_records(period_str)
+    """Register or update confirmed shift records in kintone (1 record per staff per day)."""
+    existing = fetch_existing_records(period_start, period_end)
 
     to_add = []
     to_update = []
 
     for staff in staff_data:
-        record = build_kintone_record(staff, period_str, approver, approved_at,
-                                      schedule_version)
-        sid = staff.get("staff_id", staff["name"])
-        record_id = existing.get(sid)
+        sid = staff.get("staff_id", "")
+        name = staff.get("name", "")
+        for day_info in staff.get("days", []):
+            record = build_kintone_record_per_day(
+                sid, name, day_info, period_start, period_end,
+                approver, approved_at, schedule_version,
+            )
+            key = (sid, day_info["date"])
+            record_id = existing.get(key)
+            if record_id:
+                to_update.append({"id": record_id, "record": record})
+            else:
+                to_add.append(record)
 
-        if record_id:
-            to_update.append({"id": record_id, "record": record})
-        else:
-            to_add.append(record)
+    total_work = sum(
+        1 for s in staff_data for d in s.get("days", []) if d["status"] == "出勤"
+    )
+    total_off = sum(
+        1 for s in staff_data for d in s.get("days", []) if d["status"] != "出勤"
+    )
 
     if dry_run:
         print(f"  [dry-run] Would add {len(to_add)} / update {len(to_update)} records")
-        for staff in staff_data:
-            sid = staff.get("staff_id", staff["name"])
-            action = "update" if sid in existing else "add"
-            print(f"    [{action}] {staff.get('staff_id', '')} {staff['name']}: "
-                  f"出勤{len(staff['working_days'])}日, 休{len(staff['off_days'])}日")
+        print(f"  Total: {total_work} work-day records, {total_off} off-day records")
         return len(to_add), len(to_update)
 
     added = 0
     updated = 0
 
-    if to_add:
-        kintone_add_records(to_add)
-        added = len(to_add)
-        print(f"  Added {added} new records")
+    # kintone allows max 100 records per request
+    for i in range(0, len(to_add), 100):
+        batch = to_add[i:i + 100]
+        kintone_add_records(batch)
+        added += len(batch)
 
-    if to_update:
-        kintone_update_records(to_update)
-        updated = len(to_update)
+    for i in range(0, len(to_update), 100):
+        batch = to_update[i:i + 100]
+        kintone_update_records(batch)
+        updated += len(batch)
+
+    if added:
+        print(f"  Added {added} new records")
+    if updated:
         print(f"  Updated {updated} existing records")
 
     return added, updated
@@ -361,8 +380,9 @@ def run(dry_run=False, schedule_version=None):
     try:
         # (1) Read shift output
         print("[1/2] Reading shift data from spreadsheet...")
-        period_str, approver, approved_at, sv, dates, staff_data = read_shift_output()
+        period_start, period_end, approver, approved_at, sv, dates, staff_data = read_shift_output()
         version = schedule_version or sv
+        period_str = f"{period_start} ~ {period_end}"
         print(f"  Schedule version: {version}")
 
         # Check outbox
@@ -370,10 +390,10 @@ def run(dry_run=False, schedule_version=None):
             print("  kintone already registered for this version, skipping.")
             return
 
-        # (2) Register to kintone
+        # (2) Register to kintone (1 record per staff per day)
         print("[2/2] Registering to kintone...")
         added, updated = register_to_kintone(
-            staff_data, period_str, approver, approved_at,
+            staff_data, period_start, period_end, approver, approved_at,
             schedule_version=version, dry_run=dry_run,
         )
 

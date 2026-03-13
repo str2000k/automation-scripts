@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>シフト希望入力</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 16px; background: #f5f5f5; }
+    .day-card { background: white; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .day-header { font-weight: bold; font-size: 16px; margin-bottom: 8px; }
+    select { width: 100%; padding: 8px; margin-bottom: 8px; border-radius: 4px; border: 1px solid #ddd; }
+    .time-row { display: flex; gap: 8px; }
+    .time-row select { flex: 1; }
+    button.submit-btn { width: 100%; padding: 14px; background: #06C755; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; margin-top: 16px; cursor: pointer; }
+    button.submit-btn:disabled { background: #ccc; }
+    .loading { text-align: center; padding: 40px; }
+    .error { color: #d32f2f; padding: 16px; text-align: center; }
+    .success { color: #2e7d32; padding: 16px; text-align: center; font-size: 18px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h2>シフト希望入力</h2>
+  <p id="staff-name"></p>
+  <p id="period-label"></p>
+  <div id="loading" class="loading">読み込み中...</div>
+  <div id="error" class="error hidden"></div>
+  <div id="success" class="success hidden"></div>
+  <div id="days-container"></div>
+  <button id="submit-btn" class="submit-btn hidden" onclick="submitShift()">提出する</button>
+
+  <script>
+    // Configuration - set these before deploying
+    const LIFF_ID = ''; // Set your LIFF ID
+    const KINTONE_DOMAIN = 'ny76p.cybozu.com';
+    const KINTONE_APP_ID = 211;
+    // Note: In production, use a proxy server to avoid exposing kintone credentials
+    // This is a simplified version for the LIFF prototype
+
+    let staffId = null;
+    let staffName = null;
+    let pendingRecords = [];
+
+    async function initializeLiff() {
+      try {
+        await liff.init({ liffId: LIFF_ID });
+
+        if (!liff.isLoggedIn()) {
+          liff.login();
+          return;
+        }
+
+        const profile = await liff.getProfile();
+        const lineUid = profile.userId;
+        document.getElementById('staff-name').textContent = profile.displayName + 'さん';
+
+        // Look up staff by LINE UID via your API proxy
+        await loadStaffAndRecords(lineUid);
+      } catch (error) {
+        showError('初期化エラー: ' + error.message);
+      }
+    }
+
+    async function loadStaffAndRecords(lineUid) {
+      // In production, call your backend API that:
+      // 1. Looks up staff_id by LINE UID from staff master
+      // 2. Fetches pending kintone records for that staff
+      // For now, show placeholder
+      showError('LIFF_IDとバックエンドAPIの設定が必要です。管理者に連絡してください。');
+    }
+
+    function renderDayCards(records) {
+      const container = document.getElementById('days-container');
+      container.innerHTML = '';
+
+      const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
+
+      records.forEach((record, index) => {
+        const date = new Date(record.shift_date);
+        const dayName = dayNames[date.getDay()];
+
+        const card = document.createElement('div');
+        card.className = 'day-card';
+        card.innerHTML = `
+          <div class="day-header">${record.shift_date} (${dayName})</div>
+          <select id="type-${index}" onchange="toggleTime(${index})">
+            <option value="出勤">出勤</option>
+            <option value="休み">休み</option>
+          </select>
+          <div id="time-detail-${index}">
+            <select id="time-type-${index}" onchange="toggleCustomTime(${index})">
+              <option value="フリー">時間おまかせ</option>
+              <option value="時間指定">時間指定</option>
+            </select>
+            <div id="custom-time-${index}" class="time-row hidden">
+              <select id="start-${index}">${generateTimeOptions()}</select>
+              <span style="line-height:35px">〜</span>
+              <select id="end-${index}">${generateTimeOptions('18:00')}</select>
+            </div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('submit-btn').classList.remove('hidden');
+    }
+
+    function generateTimeOptions(defaultVal) {
+      let options = '';
+      for (let h = 9; h <= 24; h++) {
+        for (let m = 0; m < 60; m += 30) {
+          const hour = h === 24 ? 0 : h;
+          const time = `${String(hour).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+          const label = h >= 24 ? `翌${time}` : time;
+          const selected = time === (defaultVal || '10:00') ? ' selected' : '';
+          options += `<option value="${time}"${selected}>${label}</option>`;
+        }
+      }
+      return options;
+    }
+
+    function toggleTime(index) {
+      const type = document.getElementById(`type-${index}`).value;
+      const detail = document.getElementById(`time-detail-${index}`);
+      detail.classList.toggle('hidden', type === '休み');
+    }
+
+    function toggleCustomTime(index) {
+      const timeType = document.getElementById(`time-type-${index}`).value;
+      const custom = document.getElementById(`custom-time-${index}`);
+      custom.classList.toggle('hidden', timeType !== '時間指定');
+    }
+
+    async function submitShift() {
+      const btn = document.getElementById('submit-btn');
+      btn.disabled = true;
+      btn.textContent = '送信中...';
+
+      try {
+        // Collect form data and send to backend API
+        const updates = pendingRecords.map((record, index) => {
+          const shiftType = document.getElementById(`type-${index}`).value;
+          const result = {
+            record_id: record.record_id,
+            shift_type: shiftType,
+            input_status: '入力済',
+          };
+
+          if (shiftType === '出勤') {
+            const timeType = document.getElementById(`time-type-${index}`).value;
+            result.work_time_type = timeType;
+            if (timeType === '時間指定') {
+              result.start_time = document.getElementById(`start-${index}`).value;
+              result.end_time = document.getElementById(`end-${index}`).value;
+            }
+          }
+
+          return result;
+        });
+
+        // In production, POST to your backend API
+        // await fetch('/api/shift/submit', { method: 'POST', body: JSON.stringify(updates) });
+
+        document.getElementById('days-container').classList.add('hidden');
+        btn.classList.add('hidden');
+        document.getElementById('success').textContent = '提出しました！';
+        document.getElementById('success').classList.remove('hidden');
+
+        setTimeout(() => { liff.closeWindow(); }, 2000);
+      } catch (error) {
+        showError('送信エラー: ' + error.message);
+        btn.disabled = false;
+        btn.textContent = '提出する';
+      }
+    }
+
+    function showError(msg) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('error').textContent = msg;
+      document.getElementById('error').classList.remove('hidden');
+    }
+
+    // Initialize on load
+    initializeLiff();
+  </script>
+</body>
+</html>

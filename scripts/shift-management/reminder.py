@@ -2,7 +2,8 @@
 """STEP F: Shift start reminder.
 
 Sends reminders to staff before their shift period starts.
-Checks kintone app 212 for confirmed shifts and notifies via Slack DM and LINE.
+Queries kintone app 212 (1 record = 1 staff x 1 day) for confirmed shifts
+and notifies via Slack DM and LINE.
 
 Usage:
     python3 reminder.py                                # dry-run, 3 days ahead
@@ -42,64 +43,53 @@ def _kintone_headers():
     }
 
 
-def fetch_confirmed_shifts():
-    """Fetch all confirmed shift records from kintone ID=212.
+def fetch_shifts_by_period_start(target_date):
+    """Fetch confirmed shift records from kintone ID=212 where period_start = target_date.
 
-    Returns list of dicts: {staff_id, staff_name, shift_period, working_days}
+    New schema: 1 record = 1 staff x 1 day.
+    Groups by staff_id and returns list of dicts:
+        {staff_id, staff_name, period_start, period_end, working_days: [date, ...]}
     """
     headers = _kintone_headers()
-    query = 'order by staff_id asc'
-    encoded_query = urllib.parse.quote(query)
-    url = (
-        f"https://{KINTONE_DOMAIN}/k/v1/records.json"
-        f"?app={KINTONE_SHIFT_CONFIRMED_APP_ID}"
-        f"&query={encoded_query}&totalCount=true"
-    )
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read())
+    url = f"https://{KINTONE_DOMAIN}/k/v1/records.json"
+    body = {
+        "app": KINTONE_SHIFT_CONFIRMED_APP_ID,
+        "query": (
+            f'period_start = "{target_date}" and shift_status in ("出勤") '
+            f'order by staff_id asc, shift_date asc'
+        ),
+        "totalCount": True,
+    }
+    req_data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=req_data, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"kintone query error {e.code}: {err_body}") from e
 
     records = data.get("records", [])
-    result = []
+
+    # Group by staff_id
+    staff_map = {}
     for r in records:
         staff_id = r.get("staff_id", {}).get("value", "")
-        staff_name = r.get("staff_name", {}).get("value", "")
-        shift_period = r.get("shift_period", {}).get("value", "")
-        working_days_str = r.get("working_days", {}).get("value", "")
-        working_days = [d.strip() for d in working_days_str.split(",") if d.strip()]
+        if not staff_id:
+            continue
+        if staff_id not in staff_map:
+            staff_map[staff_id] = {
+                "staff_id": staff_id,
+                "staff_name": r.get("staff_name", {}).get("value", ""),
+                "period_start": r.get("period_start", {}).get("value", ""),
+                "period_end": r.get("period_end", {}).get("value", ""),
+                "working_days": [],
+            }
+        shift_date = r.get("shift_date", {}).get("value", "")
+        if shift_date:
+            staff_map[staff_id]["working_days"].append(shift_date)
 
-        result.append({
-            "staff_id": staff_id,
-            "staff_name": staff_name,
-            "shift_period": shift_period,
-            "working_days": working_days,
-        })
-
-    return result
-
-
-def extract_start_date(shift_period):
-    """Extract start date from shift_period string.
-
-    Examples:
-        "2026-03-09 ~ 2026-03-22" -> "2026-03-09"
-        "2026-03-09_2026-03-22" -> "2026-03-09"
-    """
-    if not shift_period:
-        return None
-    # Try "~" separator first
-    if "~" in shift_period:
-        return shift_period.split("~")[0].strip()
-    # Try "_" separator
-    if "_" in shift_period:
-        parts = shift_period.split("_")
-        # Could be "2026-03-09_2026-03-22" or "2026-03-09_v1"
-        if len(parts) >= 2 and len(parts[0]) == 10:
-            return parts[0]
-    # Assume the whole string is a date
-    if len(shift_period) == 10:
-        return shift_period
-    return None
+    return list(staff_map.values())
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +179,7 @@ def sheets_read(range_name):
 
 def read_staff_master():
     """Read staff master keyed by staff_id."""
-    rows = sheets_read("スタッフマスタ!A1:I100")
+    rows = sheets_read("スタッフマスタ!A1:L100")
     if not rows:
         return {}
 
@@ -215,13 +205,14 @@ def read_staff_master():
 # Messaging
 # ---------------------------------------------------------------------------
 
-def build_reminder_message(staff_name, start_date, working_days):
+def build_reminder_message(staff_name, period_start, period_end, working_days):
     """Build reminder message for a staff member."""
     days_list = ", ".join(working_days) if working_days else "なし"
+    period_str = f"{period_start} 〜 {period_end}" if period_end else period_start
     return (
-        f"【リマインド】{start_date}からのシフトが始まります。\n\n"
+        f"【リマインド】{period_str} のシフトが始まります。\n\n"
         f"あなたのシフト:\n"
-        f"出勤日: {days_list}\n\n"
+        f"出勤日({len(working_days)}日): {days_list}\n\n"
         f"詳細はkintoneから確認できます:\n"
         f"{KINTONE_APP_URL}"
     )
@@ -320,6 +311,10 @@ def slack_notify_error(location, error):
 def run(dry_run=True, days_ahead=3, reference_date=None):
     """Run shift reminder check.
 
+    Queries kintone 212 for shifts where period_start = target_date
+    (new 1-record-per-day schema). Groups by staff and sends one
+    reminder per staff member via Slack DM and LINE.
+
     Args:
         dry_run: If True, only print what would be sent
         days_ahead: How many days before shift start to send reminder
@@ -337,34 +332,25 @@ def run(dry_run=True, days_ahead=3, reference_date=None):
 
     print(f"  Today: {today}")
     print(f"  Days ahead: {days_ahead}")
-    print(f"  Looking for shifts starting on: {target_start_str}")
+    print(f"  Looking for shifts with period_start: {target_start_str}")
     print(f"  Mode: {'dry-run' if dry_run else 'LIVE'}")
 
     try:
-        # (1) Fetch confirmed shifts from kintone
-        print("\n[1/3] Fetching confirmed shifts from kintone...")
-        all_records = fetch_confirmed_shifts()
-        print(f"  Total records: {len(all_records)}")
-
-        # (2) Filter to shifts starting on target date
-        target_records = []
-        for r in all_records:
-            start_date = extract_start_date(r["shift_period"])
-            if start_date == target_start_str:
-                target_records.append(r)
-
-        print(f"  Matching records (start={target_start_str}): {len(target_records)}")
+        # (1) Query kintone 212 for shifts starting on target date
+        print("\n[1/3] Querying kintone for period_start =", target_start_str, "...")
+        target_records = fetch_shifts_by_period_start(target_start_str)
+        print(f"  Matching staff: {len(target_records)}")
 
         if not target_records:
             print("\n  No shifts starting on target date. Nothing to send.")
             return target_records
 
-        # (3) Get staff contact info
+        # (2) Get staff contact info
         print("\n[2/3] Reading staff master...")
         staff_map = read_staff_master()
         print(f"  Staff master: {len(staff_map)} entries")
 
-        # (4) Send reminders
+        # (3) Send reminders
         print("\n[3/3] Sending reminders...")
         slack_sent = 0
         line_sent = 0
@@ -373,16 +359,19 @@ def run(dry_run=True, days_ahead=3, reference_date=None):
         for r in target_records:
             staff_id = r["staff_id"]
             staff_name = r["staff_name"]
+            period_start = r["period_start"]
+            period_end = r["period_end"]
+            working_days = r["working_days"]
             staff_info = staff_map.get(staff_id, {})
             slack_id = staff_info.get("Slack ID", "").strip()
             line_uid = staff_info.get("LINE UID", "").strip()
 
             message = build_reminder_message(
-                staff_name, target_start_str, r["working_days"]
+                staff_name, period_start, period_end, working_days
             )
 
             if dry_run:
-                print(f"  [dry-run] {staff_id} {staff_name}:")
+                print(f"  [dry-run] {staff_id} {staff_name} ({len(working_days)}日出勤):")
                 if slack_id:
                     print(f"    Slack DM -> {slack_id}")
                 if line_uid:

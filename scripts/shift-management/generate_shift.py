@@ -303,7 +303,7 @@ def slack_notify_success(period_start, period_end, staff_count):
 
 def read_staff_master():
     """Read staff master from spreadsheet. Returns list of dicts keyed by staff_id."""
-    rows = sheets_read("スタッフマスタ!A1:I100")
+    rows = sheets_read("スタッフマスタ!A1:L100")
     if not rows:
         raise RuntimeError("スタッフマスタが空です")
 
@@ -318,12 +318,8 @@ def read_staff_master():
         for i, h in enumerate(header):
             d[h] = row[i]
         # Only include active staff
-        if d.get("有効フラグ", "").upper() in ("FALSE", "0", "無効", ""):
-            if d.get("有効フラグ", "") == "":
-                # Empty = default active
-                pass
-            else:
-                continue
+        if d.get("有効フラグ", "") == "無効":
+            continue
         # Require staff_id
         if not d.get(STAFF_ID_COLUMN):
             print(f"  WARNING: staff_id missing for {d.get('氏名', '?')}, skipping")
@@ -334,19 +330,33 @@ def read_staff_master():
     return staff
 
 
-def read_rule_master():
-    """Read rule master from spreadsheet. Returns dict of rule_name -> value."""
-    rows = sheets_read("ルールマスタ!A1:C20")
-    if not rows:
-        raise RuntimeError("ルールマスタが空です")
-
-    rules = {}
-    for row in rows[1:]:
-        if len(row) >= 2 and row[0]:
-            rules[row[0]] = row[1]
-
-    print(f"  Rules loaded: {rules}")
+def read_rules_master():
+    """Read 共通ルールマスタ as free-text lines. Returns List[str]."""
+    rows = sheets_read("共通ルールマスタ!A3:A100")
+    rules = []
+    for row in rows:
+        if row and row[0] and str(row[0]).strip():
+            rules.append(str(row[0]).strip())
+    print(f"  Rules loaded: {len(rules)} lines")
     return rules
+
+
+def read_store_master():
+    """Read 店舗マスタ. Returns list of dicts for active stores."""
+    rows = sheets_read("店舗マスタ!A1:H100")
+    if not rows:
+        return []
+    headers = rows[0]
+    stores = []
+    for row in rows[1:]:
+        while len(row) < len(headers):
+            row.append("")
+        d = {headers[i]: row[i] for i in range(len(headers))}
+        if d.get("有効フラグ", "有効") == "無効":
+            continue
+        stores.append(d)
+    print(f"  Stores loaded: {len(stores)} active stores")
+    return stores
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +443,7 @@ def day_label(date_str):
     return dow[d.weekday()]
 
 
-def build_claude_prompt(staff, rules, wishes, dates):
+def build_claude_prompt(staff, rules, stores, wishes, dates):
     """Build the prompt for Claude to generate shift schedule."""
 
     # Build staff info
@@ -441,29 +451,35 @@ def build_claude_prompt(staff, rules, wishes, dates):
     for s in staff:
         name = s.get("氏名", "")
         emp_type = s.get("雇用形態", "")
+        shift_type = s.get("働き方", "")
         max_hours = s.get("最大労働時間/週", "40")
         forced = s.get("強制出勤日", "")
-        skills = s.get("役割・スキル", "")
+        store = s.get("対応店舗", "")
+        position = s.get("役職", "")
+        personal_rule = s.get("個人ルール", "")
         staff_info.append(
-            f"- {name} (雇用: {emp_type}, 週最大: {max_hours}h, "
-            f"強制出勤日: {forced or 'なし'}, スキル: {skills or 'なし'})"
+            f"- {name} (雇用: {emp_type}, 働き方: {shift_type}, 役職: {position}, "
+            f"週最大: {max_hours}h, 対応店舗: {store or '未指定'}, "
+            f"強制出勤日: {forced or 'なし'}"
+            f"{', 個人ルール: ' + personal_rule if personal_rule else ''})"
         )
-
-    # Build staff_id -> name map for wish matching
-    name_to_id = {s.get("氏名", ""): s.get(STAFF_ID_COLUMN, "") for s in staff}
 
     # Build wish info
     wish_info = []
     for w in wishes:
         wish_info.append(
-            f"- {w['staff_name']}: 希望休={w['desired_days_off']}"
-            f"{' (備考: ' + w['remarks'] + ')' if w['remarks'] else ''}"
+            f"- {w['staff_name']}: 希望休={w.get('desired_days_off', w.get('shift_date', ''))}"
+            f"{' (備考: ' + w['remarks'] + ')' if w.get('remarks') else ''}"
         )
 
-    # Rules
-    min_staff = rules.get("最低必須人数", "3")
-    max_consecutive = rules.get("連続勤務上限日数", "5")
-    wish_priority = rules.get("希望休優先度（重み）", "7")
+    # Rules (free-text list)
+    rules_text = "\n".join(f"- {r}" for r in rules)
+
+    # Store rules
+    store_rules_text = "\n".join(
+        f"- {s['店舗名']}: 最低{s['最低必要人数/日']}人{', ' + s.get('店舗ルール', '') if s.get('店舗ルール') else ''}"
+        for s in stores
+    )
 
     # Date list with day-of-week
     date_labels = [f"{d}({day_label(d)})" for d in dates]
@@ -484,13 +500,18 @@ def build_claude_prompt(staff, rules, wishes, dates):
 ## 希望休データ
 {chr(10).join(wish_info) if wish_info else '希望休なし'}
 
-## ルール（必ず守ること）
+## 共通ルール
+{rules_text}
+
+## 店舗ルール
+{store_rules_text if store_rules_text else 'なし'}
+
+## 追加の制約
 1. 強制出勤日が指定されたスタッフは、その曜日に必ず「出勤」にする
-2. 毎日の出勤人数が最低{min_staff}人以上になること
-3. 連続勤務日数は最大{max_consecutive}日まで（超えたら休みを入れる）
-4. 希望休をできるだけ反映する（優先度: {wish_priority}/10）
-5. 各スタッフの最大労働時間/週（8h/日で計算）を超えないこと
-6. 土日祝日も含め全日カバーすること
+2. 各スタッフの最大労働時間/週（8h/日で計算）を超えないこと
+3. 土日祝日も含め全日カバーすること
+4. 「固定シフト」のスタッフは管理者が別途決定するため、生成対象に含めない
+5. 「混合」のスタッフは強制出勤日以外の日について希望を考慮する
 
 ## 出力形式
 以下のJSON形式のみで回答してください。説明文は不要です。
@@ -539,7 +560,7 @@ def _parse_claude_response(response):
     return result
 
 
-def call_claude_for_shift(staff, rules, wishes, dates):
+def call_claude_for_shift(staff, rules, stores, wishes, dates):
     """Call Claude API to generate shift schedule with validation and retry.
 
     LLM generates candidate schedule, Python validator checks hard rules.
@@ -556,7 +577,7 @@ def call_claude_for_shift(staff, rules, wishes, dates):
     last_violations = None
 
     for attempt in range(1, MAX_GENERATION_RETRIES + 1):
-        prompt = build_claude_prompt(staff, rules, wishes, dates)
+        prompt = build_claude_prompt(staff, rules, stores, wishes, dates)
 
         # On retry, append violation feedback to prompt
         if last_violations:
@@ -616,12 +637,15 @@ def write_shift_output(schedule_result, staff, dates, period_start, period_end):
     # Row 4: schedule_version placeholder (filled by GAS on approval)
     all_rows.append(["schedule_version", ""])
 
-    # Row 5: date headers (A5=staff_id, B5=スタッフ名, C5~P5=dates, Q5=出勤日数, R5=合計勤務時間)
+    # Row 5: 承認ステータス placeholder (filled by GAS on approval)
+    all_rows.append(["承認ステータス", ""])
+
+    # Row 6: date headers (A6=staff_id, B6=スタッフ名, C6~P6=dates, Q6=出勤日数, R6=合計勤務時間)
     date_headers = [f"{d}\n({day_label(d)})" for d in dates]
     header_row = [STAFF_ID_COLUMN, "スタッフ名"] + date_headers + ["出勤日数", "合計勤務時間"]
     all_rows.append(header_row)
 
-    # Row 6+: staff data
+    # Row 7+: staff data
     for s in staff:
         staff_id = s.get(STAFF_ID_COLUMN, "")
         name = s.get("氏名", "")
@@ -634,7 +658,7 @@ def write_shift_output(schedule_result, staff, dates, period_start, period_end):
         all_rows.append(row)
 
     # Write all data
-    end_row = 5 + len(staff)
+    end_row = 6 + len(staff)
     end_col = chr(ord("A") + len(dates) + 3)  # +3 for staff_id, name, counts
     sheets_write(f"シフト出力!A1:{end_col}{end_row}", all_rows)
     print(f"  Written shift output: {len(staff)} staff x {len(dates)} days")
@@ -648,10 +672,10 @@ def apply_conditional_formatting(dates, end_row):
     出勤=green, 休み=white, 希望休=yellow
     """
     num_dates = len(dates)
-    # Data range: C6 to P{end_row} (columns 2-15, rows 5-end_row, 0-indexed)
+    # Data range: C7 to P{end_row} (columns 2-15, rows 6-end_row, 0-indexed)
     data_range = {
         "sheetId": SHEET_ID_OUTPUT,
-        "startRowIndex": 5,       # row 6 (0-indexed)
+        "startRowIndex": 6,       # row 7 (0-indexed)
         "endRowIndex": end_row,   # exclusive
         "startColumnIndex": 2,    # column C (shifted by staff_id col)
         "endColumnIndex": 2 + num_dates,  # column P+1
@@ -737,13 +761,13 @@ def apply_conditional_formatting(dates, end_row):
         },
     ]
 
-    # Also format header row (row 5) bold + center
+    # Also format header row (row 6) bold + center
     format_requests.append({
         "repeatCell": {
             "range": {
                 "sheetId": SHEET_ID_OUTPUT,
-                "startRowIndex": 4,
-                "endRowIndex": 5,
+                "startRowIndex": 5,
+                "endRowIndex": 6,
                 "startColumnIndex": 0,
                 "endColumnIndex": 2 + len(generate_dates("2099-01-01", "2099-01-01")) + 16,
             },
@@ -819,7 +843,8 @@ def run(period_start=None, period_end=None):
         # (1) Read master data
         print("[1/5] Reading master data from spreadsheet...")
         staff = read_staff_master()
-        rules = read_rule_master()
+        rules = read_rules_master()
+        stores = read_store_master()
 
         if not staff:
             raise RuntimeError("No active staff found in スタッフマスタ")
@@ -835,7 +860,7 @@ def run(period_start=None, period_end=None):
         # (4) Generate shift with Claude API
         print("[4/5] Generating shift schedule with Claude API...")
         dates = generate_dates(period_start, period_end)
-        schedule_result = call_claude_for_shift(staff, rules, wishes, dates)
+        schedule_result = call_claude_for_shift(staff, rules, stores, wishes, dates)
 
         # (5) Write to output sheet
         print("[5/5] Writing results to 'シフト出力' sheet...")

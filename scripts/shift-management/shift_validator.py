@@ -13,6 +13,35 @@ Returns a list of violations. Empty list = valid schedule.
 from datetime import datetime, timedelta
 
 
+def _extract_rule_value(rules, pattern, default):
+    """Extract a numeric value from free-text rules list using regex pattern.
+
+    Args:
+        rules: list of rule strings or dict (legacy format)
+        pattern: regex pattern with a capture group for the number
+        default: default value if not found
+    """
+    import re
+    # Support legacy dict format
+    if isinstance(rules, dict):
+        for key in rules:
+            if re.search(pattern, key):
+                try:
+                    return int(rules[key])
+                except (ValueError, TypeError):
+                    pass
+        return default
+    # New list format
+    for rule in rules:
+        m = re.search(pattern, rule)
+        if m:
+            # Try to find a number near the match
+            nums = re.findall(r'\d+', rule)
+            if nums:
+                return int(nums[0])
+    return default
+
+
 def validate_schedule(schedule, staff, rules, dates, wishes=None):
     """Validate a shift schedule against hard rules.
 
@@ -20,7 +49,7 @@ def validate_schedule(schedule, staff, rules, dates, wishes=None):
         schedule: dict of {staff_name: [status_per_day]}
                   status is "出勤", "休み", or "希望休"
         staff: list of staff dicts from スタッフマスタ
-        rules: dict from ルールマスタ
+        rules: list of rule strings (or legacy dict)
         dates: list of date strings (YYYY-MM-DD)
         wishes: list of wish dicts (optional)
 
@@ -29,8 +58,8 @@ def validate_schedule(schedule, staff, rules, dates, wishes=None):
         severity: "hard" (must fix) or "soft" (warning)
     """
     violations = []
-    min_staff = int(rules.get("最低必須人数", "3"))
-    max_consecutive = int(rules.get("連続勤務上限日数", "5"))
+    min_staff = _extract_rule_value(rules, r"最低.*人", 3)
+    max_consecutive = _extract_rule_value(rules, r"連続", 5)
 
     # Build staff lookup
     staff_by_name = {s.get("氏名", ""): s for s in staff}
@@ -69,7 +98,7 @@ def validate_schedule(schedule, staff, rules, dates, wishes=None):
     # Rule 3: Weekly max work hours (8h/day)
     for name, days in schedule.items():
         s = staff_by_name.get(name, {})
-        max_hours = float(s.get("最大労働時間/週", "40"))
+        max_hours = float(s.get("最大労働時間/週", s.get("最大労働時間", "40")))
         max_days_per_week = max_hours / 8
 
         # Check each 7-day window

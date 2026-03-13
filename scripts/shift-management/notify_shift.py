@@ -181,7 +181,7 @@ def read_shift_output():
     work_days, off_days, wish_off_days, total_work, total_hours.
     """
     rows = sheets_read("シフト出力!A1:R100")
-    if len(rows) < 6:
+    if len(rows) < 7:
         raise RuntimeError("シフト出力シートにデータがありません")
 
     # Row 1: period
@@ -192,12 +192,13 @@ def read_shift_output():
     approval_time = rows[2][1] if len(rows) > 2 and len(rows[2]) > 1 else ""
     # Row 4: schedule_version
     schedule_version = rows[3][1] if len(rows) > 3 and len(rows[3]) > 1 else ""
+    # Row 5: 承認ステータス (skipped)
 
     if not approver:
         raise RuntimeError("シフトが未承認です。先に承認してください。")
 
-    # Row 5: date headers (C5~P5, A5=staff_id, B5=スタッフ名)
-    header_row = rows[4]
+    # Row 6: date headers (C6~P6, A6=staff_id, B6=スタッフ名)
+    header_row = rows[5]
     dates = []
     for i in range(2, min(16, len(header_row))):
         # "2026-03-09\n(月)" -> "2026-03-09"
@@ -205,9 +206,9 @@ def read_shift_output():
         if date_str and len(date_str) == 10:
             dates.append(date_str)
 
-    # Row 6+: staff data
+    # Row 7+: staff data
     shift_data = []
-    for row in rows[5:]:
+    for row in rows[6:]:
         if not row or not row[0]:
             continue
         staff_id = row[0]
@@ -249,7 +250,7 @@ def read_shift_output():
 
 def read_staff_master():
     """Read staff master keyed by staff_id. Also builds name->staff_id map."""
-    rows = sheets_read("スタッフマスタ!A1:I100")
+    rows = sheets_read("スタッフマスタ!A1:L100")
     if not rows:
         return {}
 

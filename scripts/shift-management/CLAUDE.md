@@ -30,7 +30,7 @@
 | チェック項目 | 許可値 |
 |---|---|
 | SpreadsheetID | `1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU` のみ |
-| kintone App ID | 211 (希望収集) または 212 (確定シフト) のみ |
+| kintone App ID | 211 (希望収集), 212 (確定シフト), 213 (スタッフマスタ) のみ |
 | Google Workspace MCP | gw-chillaxy のみ |
 | dry-run | デフォルト True。--no-dry-run で本番実行 |
 
@@ -67,27 +67,36 @@
   - 失敗時は failed として記録し、再実行で自動リトライ
   - `python3 run_post_approval.py [version]` で全ステップ一括実行
 
-## 9. エラーハンドリング
+## 9. 月初処理
+
+- `init_shift_requests.py` を毎月1日に実行して ID=211 のレコードを生成する
+- 対象は shift_type=希望シフト のスタッフのみ（固定シフト・混合は生成しない）
+- (staff_id, shift_date) の重複チェックにより冪等（再実行しても重複しない）
+- cron: 毎月1日朝9時に自動実行
+
+## 10. エラーハンドリング
 
 - 全処理に try-except 実装
 - エラー時は Slack 管理者チャンネル (#shift-management) に通知
 - 通知内容: 発生箇所 / エラー内容 / 日時
 
-## 10. ファイル構成
+## 11. ファイル構成
 
 ```
 scripts/shift-management/
 ├── CLAUDE.md              # このファイル (ガードレール)
 ├── config.py              # 環境変数管理
 ├── .env / .env.example    # 認証情報 (git管理外)
-├── slack_shift_bot.py     # Slack希望収集
-├── line_bot.py            # LINE希望収集
+├── init_shift_requests.py # 希望収集レコード一括生成 (月初処理)
+├── slack_shift_bot.py     # Slack Block Kit通知 (希望収集・リマインド・承認完了)
+├── line_bot.py            # LINE個別DM通知 (希望収集・リマインド・承認完了)
+├── liff/                  # LINE LIFF シフト入力フォーム
 ├── sync_staff_master.py   # スタッフマスタ同期
 ├── generate_shift.py      # AI シフト生成
 ├── shift_validator.py     # hardルール検証 (STEP C)
 ├── sync_outbox.py         # 送信先ごとの状態管理 (STEP D)
 ├── run_post_approval.py   # 承認後一括実行 (STEP D)
-├── gas_approval.js        # GAS承認ボタン + schedule_version発番
+├── gas_approval.js        # GAS承認3ボタン (承認/保留/差し戻し) + schedule_version発番
 ├── notify_shift.py        # Slack/LINE配信 (outbox連携)
 ├── calendar_sync.py       # Google Calendar同期 (outbox連携)
 ├── kintone_shift_register.py  # kintone確定登録 (outbox連携)
