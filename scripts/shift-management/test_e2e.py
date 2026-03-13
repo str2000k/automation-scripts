@@ -132,7 +132,7 @@ def _get_access_token(cred_path):
         cred["token"] = new_token
         cred["access_token"] = new_token
         expires_in = result.get("expires_in", 3600)
-        new_expiry = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat() + "Z"
+        new_expiry = (datetime.now(dt.timezone.utc) + timedelta(seconds=expires_in)).isoformat()
         cred["expiry"] = new_expiry
         cred["token_expiry"] = new_expiry
         with open(cred_path, "w") as f:

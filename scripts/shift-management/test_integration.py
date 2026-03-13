@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""STEP 5: Integration tests for shift preference collection (3 routes).
+"""Integration tests for shift preference collection (3 routes).
 
-Tests:
-  (1) Slack thread reply parse -> kintone app 211 registration
-  (2) LINE message parse -> kintone app 211 registration (input_channel=LINE)
-  (3) Direct kintone registration
+Tests (updated for 1-record-per-day kintone 211 schema):
+  (1) Slack reply parse -> kintone app 211 registration (1 record per day)
+  (2) LINE message parse -> kintone app 211 registration (1 record per day)
+  (3) Direct kintone registration (1 record per day)
 
-Each test verifies input_channel, staff_name, desired_days_off fields.
+Each test verifies input_channel, staff_id, shift_date, shift_type fields.
 Errors are reported to Slack admin DM.
 
 Usage:
@@ -31,8 +31,10 @@ from config import (
 
 # Test identifier to find/cleanup test records
 TEST_PREFIX = "__TEST__"
+TEST_STAFF_ID = "T999"
 TEST_PERIOD_START = "2099-01-01"
 TEST_PERIOD_END = "2099-01-14"
+TEST_DATES = ["2099-01-05", "2099-01-10"]
 
 
 # ---------------------------------------------------------------------------
@@ -55,44 +57,74 @@ def kintone_api(path, method="GET", body=None):
         return json.loads(resp.read())
 
 
-def kintone_add_record(staff_name, days_off, input_channel, remarks=""):
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+09:00")
-    record = {
-        "staff_name": {"value": staff_name},
-        "target_period_start": {"value": TEST_PERIOD_START},
-        "target_period_end": {"value": TEST_PERIOD_END},
-        "desired_days_off": {"value": days_off},
-        "remarks": {"value": remarks},
-        "input_channel": {"value": input_channel},
-        "submitted_at": {"value": now},
-        "status": {"value": "未処理"},
-    }
-    return kintone_api("record.json", "POST", {
+def kintone_add_day_records(staff_id, staff_name, dates, input_channel, remarks=""):
+    """Register 1 record per date (new kintone 211 schema)."""
+    records = []
+    for d in dates:
+        records.append({
+            "staff_id": {"value": staff_id},
+            "staff_name": {"value": staff_name},
+            "shift_date": {"value": d},
+            "shift_type": {"value": "休み"},
+            "work_time_type": {"value": "フリー"},
+            "start_time": {"value": ""},
+            "end_time": {"value": ""},
+            "input_status": {"value": "入力済"},
+            "input_channel": {"value": input_channel},
+            "target_period_start": {"value": TEST_PERIOD_START},
+            "target_period_end": {"value": TEST_PERIOD_END},
+            "remarks": {"value": remarks},
+        })
+    result = kintone_api("records.json", "POST", {
         "app": KINTONE_SHIFT_WISH_APP_ID,
-        "record": record,
+        "records": records,
     })
+    return [str(rid) for rid in result.get("ids", [])]
 
 
 def kintone_get_record(record_id):
-    return kintone_api(
-        f"record.json?app={KINTONE_SHIFT_WISH_APP_ID}&id={record_id}"
-    )
+    body = {"app": KINTONE_SHIFT_WISH_APP_ID, "id": record_id}
+    data = json.dumps(body).encode()
+    credential = base64.b64encode(
+        f"{KINTONE_USERNAME}:{KINTONE_PASSWORD}".encode()
+    ).decode()
+    headers = {
+        "X-Cybozu-Authorization": credential,
+        "Content-Type": "application/json",
+    }
+    url = f"https://{KINTONE_DOMAIN}/k/v1/record.json"
+    req = urllib.request.Request(url, data=data, headers=headers, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
 
 
 def kintone_delete_records(record_ids):
     if not record_ids:
         return
-    kintone_api("records.json", "DELETE", {
-        "app": KINTONE_SHIFT_WISH_APP_ID,
-        "ids": record_ids,
-    })
+    # Delete in batches of 100
+    for i in range(0, len(record_ids), 100):
+        batch = [int(rid) for rid in record_ids[i:i+100]]
+        kintone_api("records.json", "DELETE", {
+            "app": KINTONE_SHIFT_WISH_APP_ID,
+            "ids": batch,
+        })
 
 
 def kintone_find_test_records():
-    query = f'staff_name like "{TEST_PREFIX}" and target_period_start = "{TEST_PERIOD_START}"'
-    result = kintone_api(
-        f"records.json?app={KINTONE_SHIFT_WISH_APP_ID}&query={urllib.parse.quote(query)}"
-    )
+    query = f'staff_id = "{TEST_STAFF_ID}" and target_period_start = "{TEST_PERIOD_START}"'
+    body = {"app": KINTONE_SHIFT_WISH_APP_ID, "query": query, "totalCount": True}
+    data = json.dumps(body).encode()
+    credential = base64.b64encode(
+        f"{KINTONE_USERNAME}:{KINTONE_PASSWORD}".encode()
+    ).decode()
+    headers = {
+        "X-Cybozu-Authorization": credential,
+        "Content-Type": "application/json",
+    }
+    url = f"https://{KINTONE_DOMAIN}/k/v1/records.json"
+    req = urllib.request.Request(url, data=data, headers=headers, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read())
     return result.get("records", [])
 
 
@@ -128,8 +160,8 @@ class TestResult:
         self.errors = []
         self._cleanup_ids = []
 
-    def track_record(self, record_id):
-        self._cleanup_ids.append(int(record_id))
+    def track_records(self, record_ids):
+        self._cleanup_ids.extend(record_ids)
 
     def ok(self, name):
         self.passed += 1
@@ -166,11 +198,10 @@ class TestResult:
 
 def test_slack_route(result: TestResult):
     """Test Slack message parsing and kintone registration."""
-    print("\n[Test 1] Slack route: parse reply -> kintone")
+    print("\n[Test 1] Slack route: parse reply -> kintone (1 record per day)")
     location = "test_slack_route"
 
     try:
-        # Import parser from slack_shift_bot
         from slack_shift_bot import parse_shift_reply
 
         # 1a. Parse standard format
@@ -185,18 +216,20 @@ def test_slack_route(result: TestResult):
             return
         result.ok("slack_parse_remarks")
 
-        # 1b. Register parsed result to kintone
+        # 1b. Register parsed dates as individual records to kintone
         staff_name = f"{TEST_PREFIX}SlackUser"
-        resp = kintone_add_record(staff_name, days_off, "Slack", remarks)
-        record_id = resp.get("id")
-        if not record_id:
-            result.fail("slack_kintone_add", f"no record id returned: {resp}")
+        parsed_dates = [d.strip() for d in days_off.split(",")]
+        record_ids = kintone_add_day_records(
+            TEST_STAFF_ID, staff_name, parsed_dates, "Slack", remarks
+        )
+        if len(record_ids) != len(parsed_dates):
+            result.fail("slack_kintone_add", f"expected {len(parsed_dates)} records, got {len(record_ids)}")
             return
-        result.track_record(record_id)
+        result.track_records(record_ids)
         result.ok("slack_kintone_add")
 
-        # 1c. Verify registered record
-        record = kintone_get_record(record_id)
+        # 1c. Verify first registered record
+        record = kintone_get_record(record_ids[0])
         rec = record["record"]
 
         if rec["input_channel"]["value"] != "Slack":
@@ -204,15 +237,25 @@ def test_slack_route(result: TestResult):
             return
         result.ok("slack_input_channel")
 
-        if rec["staff_name"]["value"] != staff_name:
-            result.fail("slack_staff_name", f"expected '{staff_name}', got '{rec['staff_name']['value']}'")
+        if rec["staff_id"]["value"] != TEST_STAFF_ID:
+            result.fail("slack_staff_id", f"expected '{TEST_STAFF_ID}', got '{rec['staff_id']['value']}'")
             return
-        result.ok("slack_staff_name")
+        result.ok("slack_staff_id")
 
-        if rec["desired_days_off"]["value"] != "2099-01-05, 2099-01-10":
-            result.fail("slack_desired_days_off", f"got '{rec['desired_days_off']['value']}'")
+        if rec["shift_date"]["value"] != "2099-01-05":
+            result.fail("slack_shift_date", f"expected '2099-01-05', got '{rec['shift_date']['value']}'")
             return
-        result.ok("slack_desired_days_off")
+        result.ok("slack_shift_date")
+
+        if rec["shift_type"]["value"] != "休み":
+            result.fail("slack_shift_type", f"expected '休み', got '{rec['shift_type']['value']}'")
+            return
+        result.ok("slack_shift_type")
+
+        if rec["input_status"]["value"] != "入力済":
+            result.fail("slack_input_status", f"expected '入力済', got '{rec['input_status']['value']}'")
+            return
+        result.ok("slack_input_status")
 
     except Exception as e:
         detail = str(e)
@@ -226,27 +269,29 @@ def test_slack_route(result: TestResult):
 
 def test_line_route(result: TestResult):
     """Test LINE message parsing and kintone registration."""
-    print("\n[Test 2] LINE route: parse message -> kintone")
+    print("\n[Test 2] LINE route: parse message -> kintone (1 record per day)")
     location = "test_line_route"
 
     try:
         from line_bot import parse_line_message
 
-        # 2a. Parse LINE format "希望休 4/5, 4/12"
-        days_off, remarks = parse_line_message("希望休 4/5, 4/12")
+        # 2a. Parse LINE format "希望休 1/5, 1/10" (returns list of dates)
+        days_off, remarks = parse_line_message("希望休 1/5, 1/10")
         if days_off is None:
             result.fail("line_parse", "parse returned None")
             return
-        # Verify dates are normalized to YYYY-MM-DD
-        parts = [d.strip() for d in days_off.split(",")]
-        for p in parts:
-            if not (len(p) == 10 and p[4] == "-" and p[7] == "-"):
-                result.fail("line_date_normalize", f"date not YYYY-MM-DD format: '{p}'")
+        # days_off is now a list of YYYY-MM-DD strings
+        if not isinstance(days_off, list):
+            result.fail("line_parse_type", f"expected list, got {type(days_off)}")
+            return
+        for d in days_off:
+            if not (len(d) == 10 and d[4] == "-" and d[7] == "-"):
+                result.fail("line_date_normalize", f"date not YYYY-MM-DD format: '{d}'")
                 return
         result.ok("line_parse_and_normalize")
 
         # 2b. Parse with remarks
-        days_off2, remarks2 = parse_line_message("希望休 4/5, 4/12\n備考 午前のみ希望(4/8)")
+        _, remarks2 = parse_line_message("希望休 4/5, 4/12\n備考 午前のみ希望(4/8)")
         if remarks2 != "午前のみ希望(4/8)":
             result.fail("line_parse_remarks", f"expected '午前のみ希望(4/8)', got '{remarks2}'")
             return
@@ -259,19 +304,19 @@ def test_line_route(result: TestResult):
             return
         result.ok("line_parse_non_shift")
 
-        # 2d. Register to kintone with input_channel=LINE
+        # 2d. Register to kintone with input_channel=LINE (use fixed test dates)
         staff_name = f"{TEST_PREFIX}LINEUser"
-        test_days = "2099-01-05, 2099-01-12"
-        resp = kintone_add_record(staff_name, test_days, "LINE", "テストLINE備考")
-        record_id = resp.get("id")
-        if not record_id:
-            result.fail("line_kintone_add", f"no record id returned: {resp}")
+        record_ids = kintone_add_day_records(
+            TEST_STAFF_ID, staff_name, TEST_DATES, "LINE", "テストLINE備考"
+        )
+        if len(record_ids) != len(TEST_DATES):
+            result.fail("line_kintone_add", f"expected {len(TEST_DATES)} records, got {len(record_ids)}")
             return
-        result.track_record(record_id)
+        result.track_records(record_ids)
         result.ok("line_kintone_add")
 
         # 2e. Verify record fields
-        record = kintone_get_record(record_id)
+        record = kintone_get_record(record_ids[0])
         rec = record["record"]
 
         if rec["input_channel"]["value"] != "LINE":
@@ -279,15 +324,15 @@ def test_line_route(result: TestResult):
             return
         result.ok("line_input_channel")
 
-        if rec["staff_name"]["value"] != staff_name:
-            result.fail("line_staff_name", f"expected '{staff_name}', got '{rec['staff_name']['value']}'")
+        if rec["staff_id"]["value"] != TEST_STAFF_ID:
+            result.fail("line_staff_id", f"expected '{TEST_STAFF_ID}', got '{rec['staff_id']['value']}'")
             return
-        result.ok("line_staff_name")
+        result.ok("line_staff_id")
 
-        if rec["desired_days_off"]["value"] != test_days:
-            result.fail("line_desired_days_off", f"expected '{test_days}', got '{rec['desired_days_off']['value']}'")
+        if rec["shift_date"]["value"] != TEST_DATES[0]:
+            result.fail("line_shift_date", f"expected '{TEST_DATES[0]}', got '{rec['shift_date']['value']}'")
             return
-        result.ok("line_desired_days_off")
+        result.ok("line_shift_date")
 
     except Exception as e:
         detail = str(e)
@@ -301,33 +346,36 @@ def test_line_route(result: TestResult):
 
 def test_kintone_direct(result: TestResult):
     """Test direct kintone record creation and field verification."""
-    print("\n[Test 3] kintone direct registration")
+    print("\n[Test 3] kintone direct registration (1 record per day)")
     location = "test_kintone_direct"
 
     try:
         staff_name = f"{TEST_PREFIX}DirectUser"
-        days_off = "2099-01-03, 2099-01-07, 2099-01-14"
+        test_dates = ["2099-01-03", "2099-01-07", "2099-01-14"]
         input_channel = "kintone直接"
 
-        # 3a. Create record
-        resp = kintone_add_record(staff_name, days_off, input_channel, "直接登録テスト")
-        record_id = resp.get("id")
-        if not record_id:
-            result.fail("kintone_direct_add", f"no record id returned: {resp}")
+        # 3a. Create records (1 per day)
+        record_ids = kintone_add_day_records(
+            TEST_STAFF_ID, staff_name, test_dates, input_channel, "直接登録テスト"
+        )
+        if len(record_ids) != len(test_dates):
+            result.fail("kintone_direct_add", f"expected {len(test_dates)} records, got {len(record_ids)}")
             return
-        result.track_record(record_id)
+        result.track_records(record_ids)
         result.ok("kintone_direct_add")
 
-        # 3b. Read back and verify all fields
-        record = kintone_get_record(record_id)
+        # 3b. Read back and verify all fields on first record
+        record = kintone_get_record(record_ids[0])
         rec = record["record"]
 
         checks = [
             ("kintone_direct_input_channel", "input_channel", input_channel),
+            ("kintone_direct_staff_id", "staff_id", TEST_STAFF_ID),
             ("kintone_direct_staff_name", "staff_name", staff_name),
-            ("kintone_direct_desired_days_off", "desired_days_off", days_off),
+            ("kintone_direct_shift_date", "shift_date", test_dates[0]),
+            ("kintone_direct_shift_type", "shift_type", "休み"),
+            ("kintone_direct_input_status", "input_status", "入力済"),
             ("kintone_direct_remarks", "remarks", "直接登録テスト"),
-            ("kintone_direct_status", "status", "未処理"),
             ("kintone_direct_period_start", "target_period_start", TEST_PERIOD_START),
             ("kintone_direct_period_end", "target_period_end", TEST_PERIOD_END),
         ]
@@ -337,6 +385,16 @@ def test_kintone_direct(result: TestResult):
                 result.fail(check_name, f"expected '{expected}', got '{actual}'")
                 return
             result.ok(check_name)
+
+        # 3c. Verify correct number of records created
+        found = kintone_find_test_records()
+        # May include records from other tests; check at least our 3
+        found_dates = sorted(r["shift_date"]["value"] for r in found)
+        for d in test_dates:
+            if d not in found_dates:
+                result.fail("kintone_direct_date_check", f"date {d} not found in records")
+                return
+        result.ok("kintone_direct_all_dates_found")
 
     except Exception as e:
         detail = str(e)
@@ -370,12 +428,13 @@ def main():
     print(f"Integration Test - shift management ({', '.join(names)})")
     print(f"kintone app: {KINTONE_SHIFT_WISH_APP_ID} @ {KINTONE_DOMAIN}")
     print(f"Test period: {TEST_PERIOD_START} ~ {TEST_PERIOD_END}")
+    print(f"Schema: 1 record per staff per day")
 
     # Cleanup any leftover test records
     try:
         old = kintone_find_test_records()
         if old:
-            old_ids = [int(r["$id"]["value"]) for r in old]
+            old_ids = [r["$id"]["value"] for r in old]
             kintone_delete_records(old_ids)
             print(f"Cleaned up {len(old_ids)} leftover test records")
     except Exception as e:
@@ -390,7 +449,6 @@ def main():
     success = result.summary()
 
     if not success:
-        # Notify Slack of overall failure
         failed_names = [n for n, _ in result.errors]
         slack_notify_error(
             "test_integration",
