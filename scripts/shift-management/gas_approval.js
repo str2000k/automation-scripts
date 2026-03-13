@@ -26,6 +26,19 @@
 var SPREADSHEET_ID = '1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU';
 var SHEET_NAME = 'シフト出力';
 
+// Config via Script Properties (set by initializeSystem or manually)
+var DEFAULT_SLACK_SHIFT_CHANNEL = 'C0AKBJ1LTV2';
+
+function _getSlackToken() {
+  var props = PropertiesService.getScriptProperties();
+  return props.getProperty('SLACK_BOT_TOKEN') || '';
+}
+
+function _getSlackChannel() {
+  var props = PropertiesService.getScriptProperties();
+  return props.getProperty('SLACK_SHIFT_CHANNEL') || DEFAULT_SLACK_SHIFT_CHANNEL;
+}
+
 // ---------------------------------------------------------------------------
 // Menu & Button Setup
 // ---------------------------------------------------------------------------
@@ -364,9 +377,8 @@ function rejectShift() {
  * Post a Block Kit message to Slack about the shift rejection.
  */
 function notifyRejection_(period, rejector, reason) {
-  var props = PropertiesService.getScriptProperties();
-  var token = props.getProperty('SLACK_BOT_TOKEN');
-  var channel = props.getProperty('SLACK_SHIFT_CHANNEL') || '#shift-management';
+  var token = _getSlackToken();
+  var channel = _getSlackChannel();
 
   if (!token) return;
 
@@ -565,9 +577,8 @@ function collectShiftData_(sheet) {
  * Send approval notification to Slack channel.
  */
 function notifySlackApproval_(period, approver, shiftData) {
-  var props = PropertiesService.getScriptProperties();
-  var token = props.getProperty('SLACK_BOT_TOKEN');
-  var channel = props.getProperty('SLACK_SHIFT_CHANNEL') || '#shift-management';
+  var token = _getSlackToken();
+  var channel = _getSlackChannel();
 
   if (!token) return;
 
@@ -591,9 +602,8 @@ function notifySlackApproval_(period, approver, shiftData) {
  * Send error notification to Slack.
  */
 function notifySlackError_(errorMsg) {
-  var props = PropertiesService.getScriptProperties();
-  var token = props.getProperty('SLACK_BOT_TOKEN');
-  var channel = props.getProperty('SLACK_SHIFT_CHANNEL') || '#shift-management';
+  var token = _getSlackToken();
+  var channel = _getSlackChannel();
 
   if (!token) return;
 

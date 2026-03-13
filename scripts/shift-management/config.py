@@ -27,6 +27,7 @@ SHIFT_SPREADSHEET_ID = os.environ.get("SHIFT_SPREADSHEET_ID", "")
 # --- Slack ---
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
 BOLT_PORT = int(os.environ.get("BOLT_PORT", 3000))
 SLACK_SHIFT_CHANNEL = os.environ.get("SLACK_SHIFT_CHANNEL", "#shift-management")
 SLACK_ADMIN_ID = os.environ.get("SLACK_ADMIN_ID", "U07UBN61QFN")

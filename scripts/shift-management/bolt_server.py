@@ -2,15 +2,13 @@
 """
 bolt_server.py
 
-Slack Bolt server for shift button interactions.
+Slack Bolt server for shift button interactions (Socket Mode).
 Receives button taps from staff and updates kintone ID=211.
+
+No public URL required - uses WebSocket via Socket Mode.
 
 Usage:
   python3 bolt_server.py
-
-Production: expose via ngrok or fixed server.
-  ngrok http 3000
-  -> Set Request URL in Slack App > Interactivity & Shortcuts
 """
 
 import base64
@@ -22,12 +20,11 @@ import urllib.parse
 import urllib.request
 
 from slack_bolt import App
-from slack_bolt.adapter.flask import SlackRequestHandler
-from flask import Flask, request
+from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from config import (
     SLACK_BOT_TOKEN,
-    SLACK_SIGNING_SECRET,
+    SLACK_APP_TOKEN,
     BOLT_PORT,
     KINTONE_DOMAIN,
     KINTONE_USERNAME,
@@ -38,14 +35,8 @@ from config import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bolt app
-bolt_app = App(
-    token=SLACK_BOT_TOKEN,
-    signing_secret=SLACK_SIGNING_SECRET,
-)
-
-flask_app = Flask(__name__)
-handler = SlackRequestHandler(bolt_app)
+# Bolt app (Socket Mode)
+bolt_app = App(token=SLACK_BOT_TOKEN)
 
 SHIFT_CHANNEL = "C0AKBJ1LTV2"  # #shift-management
 
@@ -215,20 +206,7 @@ def handle_shift_action(ack, body, client, logger):
     )
 
 
-# -----------------------------------------------------------------------
-# Flask endpoints
-# -----------------------------------------------------------------------
-
-@flask_app.route("/slack/events", methods=["POST"])
-def slack_events():
-    return handler.handle(request)
-
-
-@flask_app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-
 if __name__ == "__main__":
-    logger.info(f"Starting Bolt server on port {BOLT_PORT}...")
-    flask_app.run(host="0.0.0.0", port=BOLT_PORT)
+    logger.info("Starting Bolt server (Socket Mode)...")
+    socket_handler = SocketModeHandler(bolt_app, SLACK_APP_TOKEN)
+    socket_handler.start()
