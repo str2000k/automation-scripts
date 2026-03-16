@@ -92,11 +92,13 @@ scripts/shift-management/
 ├── line_bot.py            # LINE個別DM通知 (希望収集・リマインド・承認完了)
 ├── liff/                  # LINE LIFF シフト入力フォーム
 ├── sync_staff_master.py   # スタッフマスタ同期
-├── generate_shift.py      # AI シフト生成
+├── sync_smarthr.py        # SmartHR → スタッフマスタ同期
+├── setup_spreadsheet.py   # スプレッドシート初期設定 (データバリデーション等)
+├── generate_shift.py      # AI シフト生成 (店舗配置+個人時間)
 ├── shift_validator.py     # hardルール検証 (STEP C)
 ├── sync_outbox.py         # 送信先ごとの状態管理 (STEP D)
 ├── run_post_approval.py   # 承認後一括実行 (STEP D)
-├── gas_approval.js        # GAS承認3ボタン (承認/保留/差し戻し) + schedule_version発番
+├── gas_approval.js        # GAS メニュー4機能 (Code.jsのローカルコピー)
 ├── notify_shift.py        # Slack/LINE配信 (outbox連携)
 ├── calendar_sync.py       # Google Calendar同期 (outbox連携)
 ├── kintone_shift_register.py  # kintone確定登録 (outbox連携)

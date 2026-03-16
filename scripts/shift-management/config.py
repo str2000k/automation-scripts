@@ -39,6 +39,10 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 # --- Anthropic (Claude API) ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
+# --- SmartHR ---
+SMARTHR_SUBDOMAIN = os.environ.get("SMARTHR_SUBDOMAIN", "")
+SMARTHR_ACCESS_TOKEN = os.environ.get("SMARTHR_ACCESS_TOKEN", "")
+
 # --- MF Cloud Attendance ---
 MF_ACCESS_TOKEN = os.environ.get("MF_ACCESS_TOKEN", "")
 MF_CLIENT_ID = os.environ.get("MF_CLIENT_ID", "")

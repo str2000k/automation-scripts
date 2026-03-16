@@ -4,9 +4,13 @@
 Processing order:
   (1) Read staff master & rule master from spreadsheet
   (2) Fetch wish records from kintone app 211 for target period
-  (3) Write wish data to '希望収集データ' sheet
-  (4) Call Claude API to generate shift schedule
-  (5) Write results to 'シフト出力' sheet with conditional formatting
+  (3) Write wish data to '希望収集データ' sheet (grid format)
+  (4) Call Claude API to generate shift schedule (store-based)
+  (5) Write results to 'シフト出力' sheet (store-based layout)
+
+Output sheet layout matches the reference spreadsheet format:
+  - Store assignment section (早番/遅番 per retail store)
+  - Individual time schedule section (per staff)
 
 Usage:
     python3 generate_shift.py                    # Auto-detect next period
@@ -30,6 +34,21 @@ from config import (
 
 GOOGLE_EMAIL = "satoru@chillaxy.jp"
 SHEET_ID_OUTPUT = 1533022256  # シフト出力 sheet id
+SHEET_ID_WISH = 1764958489    # 希望収集データ sheet id
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def col_letter(idx):
+    """Convert 0-based column index to spreadsheet letter(s). 0=A, 25=Z, 26=AA."""
+    result = ""
+    idx_copy = idx
+    while idx_copy >= 0:
+        result = chr(ord("A") + idx_copy % 26) + result
+        idx_copy = idx_copy // 26 - 1
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -53,9 +72,7 @@ def kintone_api(path, method="GET", body=None):
 
 
 def sheets_read(range_name):
-    """Read from Google Sheets via gw-chillaxy MCP proxy is not available
-    in standalone scripts. Use Sheets API v4 with service account or
-    OAuth token from cached credentials."""
+    """Read from Google Sheets."""
     cred_path = _find_google_credential()
     if not cred_path:
         raise RuntimeError("No Google OAuth credential found")
@@ -141,13 +158,11 @@ def _find_google_credential():
     """Find Google OAuth credential file for satoru@chillaxy.jp."""
     import os
     base_dir = os.path.expanduser("~/.google_workspace_mcp")
-    # Try known subdirectory names
     for subdir in ["chillaxy", "gw-chillaxy"]:
         base = os.path.join(base_dir, subdir)
         target = os.path.join(base, "satoru@chillaxy.jp.json")
         if os.path.exists(target):
             return target
-    # Fallback: search all subdirs
     if os.path.isdir(base_dir):
         for subdir in os.listdir(base_dir):
             path = os.path.join(base_dir, subdir, "satoru@chillaxy.jp.json")
@@ -161,7 +176,6 @@ def _get_access_token(cred_path):
     with open(cred_path) as f:
         cred = json.load(f)
 
-    # Check if token is still valid
     token = cred.get("token") or cred.get("access_token")
     expiry = cred.get("expiry") or cred.get("token_expiry")
 
@@ -173,7 +187,6 @@ def _get_access_token(cred_path):
         except (ValueError, TypeError):
             pass
 
-    # Try to refresh
     refresh_token = cred.get("refresh_token")
     client_id = cred.get("client_id")
     client_secret = cred.get("client_secret")
@@ -191,11 +204,11 @@ def _get_access_token(cred_path):
             result = json.loads(resp.read())
         new_token = result["access_token"]
 
-        # Update cached credential
         cred["token"] = new_token
         cred["access_token"] = new_token
         expires_in = result.get("expires_in", 3600)
-        new_expiry = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat() + "Z"
+        from datetime import timezone
+        new_expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
         cred["expiry"] = new_expiry
         cred["token_expiry"] = new_expiry
         with open(cred_path, "w") as f:
@@ -210,17 +223,9 @@ def _get_access_token(cred_path):
 
 
 def claude_api(prompt, system_prompt=""):
-    """Call Anthropic Claude API.
-
-    Tries direct API first. If ANTHROPIC_API_KEY is not set or credits
-    are insufficient, raises RuntimeError so caller can handle it.
-    """
+    """Call Anthropic Claude API."""
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set")
-
-    full_prompt = prompt
-    if system_prompt:
-        full_prompt = f"[System]: {system_prompt}\n\n{prompt}"
 
     url = "https://api.anthropic.com/v1/messages"
     headers = {
@@ -230,8 +235,8 @@ def claude_api(prompt, system_prompt=""):
     }
     body = {
         "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4096,
-        "messages": [{"role": "user", "content": full_prompt}],
+        "max_tokens": 8192,
+        "messages": [{"role": "user", "content": prompt}],
     }
     if system_prompt:
         body["system"] = system_prompt
@@ -239,13 +244,12 @@ def claude_api(prompt, system_prompt=""):
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
         raise RuntimeError(f"Claude API error ({e.code}): {error_body}")
 
-    # Extract text from response
     for block in result.get("content", []):
         if block.get("type") == "text":
             return block["text"]
@@ -302,25 +306,31 @@ def slack_notify_success(period_start, period_end, staff_count):
 # ---------------------------------------------------------------------------
 
 def read_staff_master():
-    """Read staff master from spreadsheet. Returns list of dicts keyed by staff_id."""
-    rows = sheets_read("スタッフマスタ!A1:L100")
+    """Read staff master from spreadsheet. Returns list of dicts keyed by staff_id.
+
+    Reads A1:N100. Checkbox columns I-M (store assignments).
+    対応店舗 is computed from store checkbox columns at read time.
+    """
+    rows = sheets_read("スタッフマスタ!A1:P100")
     if not rows:
         raise RuntimeError("スタッフマスタが空です")
 
     header = rows[0]
+    store_names = ["藤沢", "伊勢佐木町", "新宿", "工場", "本部オフィス", "EC"]
     staff = []
     for row in rows[1:]:
         if not row or not row[0]:
             continue
-        # Pad row to header length
         row += [""] * (len(header) - len(row))
         d = {}
         for i, h in enumerate(header):
             d[h] = row[i]
-        # Only include active staff
+        # Compute 対応店舗 from store checkbox columns
+        d["対応店舗"] = ", ".join(
+            name for name in store_names if str(d.get(name, "")).upper() == "TRUE"
+        )
         if d.get("有効フラグ", "") == "無効":
             continue
-        # Require staff_id
         if not d.get(STAFF_ID_COLUMN):
             print(f"  WARNING: staff_id missing for {d.get('氏名', '?')}, skipping")
             continue
@@ -360,68 +370,94 @@ def read_store_master():
 
 
 # ---------------------------------------------------------------------------
-# (2) Fetch wish records from kintone
+# (2) Fetch wish records from kintone (per-day format)
 # ---------------------------------------------------------------------------
 
 def fetch_wishes(period_start, period_end):
-    """Fetch shift wish records from kintone for the target period."""
+    """Fetch shift wish records from kintone for the target period.
+
+    Returns dict: {staff_id: {date_str: {shift_type, start_time, end_time, staff_name}}}
+    """
     query = (
         f'target_period_start = "{period_start}" '
-        f'and target_period_end = "{period_end}"'
+        f'and target_period_end = "{period_end}" '
+        f'and input_status in ("入力済")'
     )
+    encoded = urllib.parse.quote(query + " order by shift_date asc limit 500")
     result = kintone_api(
-        f"records.json?app={KINTONE_SHIFT_WISH_APP_ID}"
-        f"&query={urllib.parse.quote(query)}&totalCount=true"
+        f"records.json?app={KINTONE_SHIFT_WISH_APP_ID}&query={encoded}"
     )
     records = result.get("records", [])
-    wishes = []
-    for r in records:
-        wishes.append({
-            "staff_id": r.get("staff_id", {}).get("value", ""),
-            "staff_name": r["staff_name"]["value"],
-            "desired_days_off": r["desired_days_off"]["value"],
-            "remarks": r["remarks"]["value"],
-            "input_channel": r["input_channel"]["value"],
-            "submitted_at": r["submitted_at"]["value"],
-            "status": r["status"]["value"],
-        })
 
-    print(f"  Wishes loaded: {len(wishes)} records from kintone")
+    wishes = {}
+    for r in records:
+        sid = r.get("staff_id", {}).get("value", "")
+        date = r.get("shift_date", {}).get("value", "")
+        if not sid or not date:
+            continue
+        if sid not in wishes:
+            wishes[sid] = {}
+        wishes[sid][date] = {
+            "staff_name": r.get("staff_name", {}).get("value", ""),
+            "shift_type": r.get("shift_type", {}).get("value", "出勤"),
+            "start_time": r.get("start_time", {}).get("value", ""),
+            "end_time": r.get("end_time", {}).get("value", ""),
+        }
+
+    total = sum(len(v) for v in wishes.values())
+    print(f"  Wishes loaded: {total} day-records for {len(wishes)} staff from kintone")
     return wishes
 
 
 # ---------------------------------------------------------------------------
-# (3) Write wish data to '希望収集データ' sheet
+# (3) Write wish data to '希望収集データ' sheet (grid format)
 # ---------------------------------------------------------------------------
 
-def write_wishes_to_sheet(wishes):
-    """Write wish data to the '希望収集データ' sheet."""
-    # Clear existing data (keep header)
-    sheets_clear("希望収集データ!A2:H1000")
+def write_wishes_to_sheet(wishes, staff, dates):
+    """Write wish data in grid format matching reference 希望シフト sheet.
 
-    if not wishes:
-        print("  No wishes to write")
+    Layout: Row 1 = staff names, Row 2+ = [date_label, cell_per_staff]
+    Cell values: "HH:MM-HH:MM" (work), "×" (off/希望休), "" (available/no data)
+    """
+    sheets_clear("希望収集データ!A1:AZ200")
+
+    # Only show 希望シフト / 混合 staff (fixed shift staff don't submit wishes)
+    wish_staff = [s for s in staff if s.get("働き方") in ("希望シフト", "混合")]
+
+    if not wish_staff:
+        print("  No 希望シフト staff to display")
         return
 
-    rows = []
-    for w in wishes:
-        rows.append([
-            w["staff_name"],
-            "",  # period start (in kintone record)
-            "",  # period end
-            w["desired_days_off"],
-            w["remarks"],
-            w["input_channel"],
-            w["submitted_at"],
-            w["status"],
-        ])
+    # Row 1: header with staff names
+    header = [""] + [s["氏名"] for s in wish_staff]
+    rows = [header]
 
-    sheets_write(f"希望収集データ!A2:H{1 + len(rows)}", rows)
-    print(f"  Written {len(rows)} wish records to sheet")
+    # Data rows: one per date
+    for date in dates:
+        d = datetime.strptime(date, "%Y-%m-%d")
+        date_label = f"{d.month}/{d.day}"
+        row = [date_label]
+        for s in wish_staff:
+            sid = s[STAFF_ID_COLUMN]
+            day = wishes.get(sid, {}).get(date, {})
+            stype = day.get("shift_type", "")
+            start = day.get("start_time", "")
+            end = day.get("end_time", "")
+            if stype in ("休み", "希望休"):
+                row.append("×")
+            elif start and end:
+                row.append(f"{start}-{end}")
+            else:
+                row.append("")
+        rows.append(row)
+
+    end_col = col_letter(len(header) - 1)
+    sheets_write(f"希望収集データ!A1:{end_col}{len(rows)}", rows)
+    print(f"  Written wish grid: {len(dates)} dates x {len(wish_staff)} staff")
 
 
 # ---------------------------------------------------------------------------
-# (4) Call Claude API to generate shift
+# (4) Call Claude API to generate shift (store-based)
 # ---------------------------------------------------------------------------
 
 def generate_dates(period_start, period_end):
@@ -444,9 +480,12 @@ def day_label(date_str):
 
 
 def build_claude_prompt(staff, rules, stores, wishes, dates):
-    """Build the prompt for Claude to generate shift schedule."""
+    """Build prompt for Claude to generate store-assigned shift schedule."""
 
-    # Build staff info
+    retail_stores = [s for s in stores if s.get("種別") == "店舗（営業）"]
+    other_stores = [s for s in stores if s.get("種別") != "店舗（営業）"]
+
+    # Staff info
     staff_info = []
     for s in staff:
         name = s.get("氏名", "")
@@ -458,35 +497,58 @@ def build_claude_prompt(staff, rules, stores, wishes, dates):
         position = s.get("役職", "")
         personal_rule = s.get("個人ルール", "")
         staff_info.append(
-            f"- {name} (雇用: {emp_type}, 働き方: {shift_type}, 役職: {position}, "
-            f"週最大: {max_hours}h, 対応店舗: {store or '未指定'}, "
-            f"強制出勤日: {forced or 'なし'}"
-            f"{', 個人ルール: ' + personal_rule if personal_rule else ''})"
+            f"- {name} (雇用:{emp_type}, 働き方:{shift_type}, 役職:{position}, "
+            f"週最大:{max_hours or '40'}h, 対応店舗:{store or '全店舗'}, "
+            f"強制出勤日:{forced or 'なし'}"
+            f"{', ルール:' + personal_rule if personal_rule else ''})"
         )
 
-    # Build wish info
-    wish_info = []
-    for w in wishes:
-        wish_info.append(
-            f"- {w['staff_name']}: 希望休={w.get('desired_days_off', w.get('shift_date', ''))}"
-            f"{' (備考: ' + w['remarks'] + ')' if w.get('remarks') else ''}"
+    # Wish info per staff
+    wish_lines = []
+    for s in staff:
+        sid = s[STAFF_ID_COLUMN]
+        name = s["氏名"]
+        staff_wishes = wishes.get(sid, {})
+        if not staff_wishes:
+            continue
+        entries = []
+        for date in dates:
+            day = staff_wishes.get(date, {})
+            stype = day.get("shift_type", "")
+            start = day.get("start_time", "")
+            end = day.get("end_time", "")
+            d = datetime.strptime(date, "%Y-%m-%d")
+            dl = f"{d.month}/{d.day}"
+            if stype in ("休み", "希望休"):
+                entries.append(f"{dl}:×")
+            elif start and end:
+                entries.append(f"{dl}:{start}-{end}")
+        if entries:
+            wish_lines.append(f"- {name}: {', '.join(entries)}")
+
+    # Store info
+    store_info = []
+    for s in retail_stores:
+        store_info.append(
+            f"- {s['店舗名']}: 営業店舗、早番・遅番の2人体制、最低{s.get('最低必要人数/日', '2')}人/日"
         )
+    for s in other_stores:
+        store_info.append(f"- {s['店舗名']}: {s.get('種別', '')}")
 
-    # Rules (free-text list)
-    rules_text = "\n".join(f"- {r}" for r in rules)
-
-    # Store rules
-    store_rules_text = "\n".join(
-        f"- {s['店舗名']}: 最低{s['最低必要人数/日']}人{', ' + s.get('店舗ルール', '') if s.get('店舗ルール') else ''}"
-        for s in stores
-    )
-
-    # Date list with day-of-week
+    rules_text = "\n".join(f"- {r}" for r in rules) if rules else "なし"
     date_labels = [f"{d}({day_label(d)})" for d in dates]
+    staff_names = [s["氏名"] for s in staff]
+    retail_names = [s["店舗名"] for s in retail_stores]
 
-    staff_names = [s.get("氏名", "") for s in staff]
+    # Build example for one day
+    example_stores = {}
+    for rs in retail_stores:
+        example_stores[rs["店舗名"]] = {"早番": "スタッフ名", "遅番": "スタッフ名"}
+    for os_item in other_stores:
+        example_stores[os_item["店舗名"]] = ["スタッフ名"]
 
     prompt = f"""以下の条件でシフトスケジュールを生成してください。
+各スタッフを店舗に割り当て、勤務時間を決定してください。
 
 ## 対象期間
 {dates[0]} ~ {dates[-1]} ({len(dates)}日間)
@@ -494,45 +556,66 @@ def build_claude_prompt(staff, rules, stores, wishes, dates):
 ## 日付一覧
 {', '.join(date_labels)}
 
-## スタッフ一覧
+## スタッフ一覧 ({len(staff)}名)
 {chr(10).join(staff_info)}
 
-## 希望休データ
-{chr(10).join(wish_info) if wish_info else '希望休なし'}
+## 店舗情報
+{chr(10).join(store_info)}
+
+## 希望シフトデータ
+{chr(10).join(wish_lines) if wish_lines else '希望データなし'}
 
 ## 共通ルール
 {rules_text}
 
-## 店舗ルール
-{store_rules_text if store_rules_text else 'なし'}
+## 店舗の早番・遅番について
+- 営業店舗（{', '.join(retail_names)}）は早番・遅番の2交代制
+- 早番: 概ね9:30〜16:00（開店準備〜午後）
+- 遅番: 概ね15:30〜0:30（午後〜閉店）
+- 各店舗に毎日必ず早番1名・遅番1名を配置
+- 同一人物が通し勤務する場合あり（例: 11:30-0:30）
 
-## 追加の制約
-1. 強制出勤日が指定されたスタッフは、その曜日に必ず「出勤」にする
-2. 各スタッフの最大労働時間/週（8h/日で計算）を超えないこと
-3. 土日祝日も含め全日カバーすること
-4. 「固定シフト」のスタッフは管理者が別途決定するため、生成対象に含めない
-5. 「混合」のスタッフは強制出勤日以外の日について希望を考慮する
+## 制約
+1. 全スタッフ（固定シフト含む）を配置対象とする
+2. 各スタッフの週最大労働時間を超えないこと
+3. 希望休（×マーク）は必ず尊重する
+4. 対応店舗が指定されているスタッフはその店舗のみに配置
+5. 最低週1日の休みを確保
+6. 土日祝日も含め全日全店舗カバー
 
-## 出力形式
-以下のJSON形式のみで回答してください。説明文は不要です。
+## 出力形式（JSONのみ、説明文不要）
 
 ```json
 {{
-  "schedule": {{
-    "スタッフ名": [
-      "出勤 or 休み or 希望休",  // {dates[0]}
-      ...  // 全{len(dates)}日分
-    ],
-    ...  // 全スタッフ分
+  "schedule": [
+    {{
+      "date": "{dates[0]}",
+      "stores": {{
+        "{retail_stores[0]['店舗名'] if retail_stores else '藤沢'}": {{"早番": "スタッフ名", "遅番": "スタッフ名"}},
+        "{retail_stores[1]['店舗名'] if len(retail_stores) > 1 else '伊勢佐木町'}": {{"早番": "スタッフ名", "遅番": "スタッフ名"}},
+        "{retail_stores[2]['店舗名'] if len(retail_stores) > 2 else '新宿'}": {{"早番": "スタッフ名", "遅番": "スタッフ名"}},
+        "{other_stores[0]['店舗名'] if other_stores else '工場'}": ["スタッフ名"]
+      }},
+      "times": {{
+        "スタッフ名1": "11:30-16:00",
+        "スタッフ名2": "15:30-0:30"
+      }}
+    }}
+  ],
+  "staff_groups": {{
+    "店舗名": ["スタッフ名1", "スタッフ名2"]
   }},
-  "daily_count": [人数, ...],  // 各日の出勤人数
-  "notes": "生成時の補足（ルール違反があれば記載）"
+  "notes": "補足"
 }}
 ```
 
-スタッフ名は以下の順序で出力: {json.dumps(staff_names, ensure_ascii=False)}
-各スタッフの配列は必ず{len(dates)}要素にしてください。
-値は「出勤」「休み」「希望休」の3種類のみです。
+### JSON出力ルール:
+- `schedule`: 全{len(dates)}日分を配列で出力
+- `stores`: 営業店舗は{{"早番":"名前","遅番":"名前"}}、非営業は["名前"]
+- `times`: その日に出勤するスタッフのみ（休みスタッフは含めない）
+- `staff_groups`: 各スタッフの主要勤務店舗でグルーピング（表示用）。全スタッフを含めること
+- スタッフ名は完全一致で使用: {json.dumps(staff_names, ensure_ascii=False)}
+- 時間は "HH:MM-HH:MM" 形式（例: "9:30-16:00", "15:30-0:30"）
 """
     return prompt
 
@@ -541,7 +624,7 @@ MAX_GENERATION_RETRIES = 3
 
 
 def _parse_claude_response(response):
-    """Parse Claude API JSON response."""
+    """Parse Claude API JSON response (store-based format)."""
     json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", response, re.DOTALL)
     if json_match:
         json_str = json_match.group(1)
@@ -553,19 +636,51 @@ def _parse_claude_response(response):
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Claude API response is not valid JSON: {e}\nResponse: {response[:500]}")
 
-    schedule = result.get("schedule", {})
+    schedule = result.get("schedule")
     if not schedule:
-        raise RuntimeError(f"Claude API returned empty schedule: {response[:500]}")
+        raise RuntimeError(f"Empty schedule in response: {response[:500]}")
 
     return result
 
 
-def call_claude_for_shift(staff, rules, stores, wishes, dates):
-    """Call Claude API to generate shift schedule with validation and retry.
+def _convert_to_legacy_schedule(result, staff, dates):
+    """Convert store-based format to legacy {name: [status,...]} for validator."""
+    staff_names = {s["氏名"] for s in staff}
+    schedule = {name: [] for name in staff_names}
 
-    LLM generates candidate schedule, Python validator checks hard rules.
-    Retries up to MAX_GENERATION_RETRIES times on hard violations.
-    """
+    for day_data in result["schedule"]:
+        working = set(day_data.get("times", {}).keys())
+        for name in staff_names:
+            schedule[name].append("出勤" if name in working else "休み")
+
+    return schedule
+
+
+def _convert_wishes_for_validator(wishes, staff, dates):
+    """Convert per-day wishes dict to flat list for validator."""
+    flat = []
+    for s in staff:
+        sid = s[STAFF_ID_COLUMN]
+        name = s["氏名"]
+        staff_wishes = wishes.get(sid, {})
+        off_dates = []
+        for date in dates:
+            day = staff_wishes.get(date, {})
+            if day.get("shift_type") in ("休み", "希望休"):
+                off_dates.append(date)
+        if off_dates:
+            flat.append({
+                "staff_id": sid,
+                "staff_name": name,
+                "desired_days_off": ", ".join(off_dates),
+                "remarks": "",
+                "shift_date": "",
+            })
+    return flat
+
+
+def call_claude_for_shift(staff, rules, stores, wishes, dates):
+    """Call Claude API to generate shift schedule with validation and retry."""
     from shift_validator import validate_schedule, format_violations, has_hard_violations
 
     system = (
@@ -575,11 +690,11 @@ def call_claude_for_shift(staff, rules, stores, wishes, dates):
     )
 
     last_violations = None
+    wishes_flat = _convert_wishes_for_validator(wishes, staff, dates)
 
     for attempt in range(1, MAX_GENERATION_RETRIES + 1):
         prompt = build_claude_prompt(staff, rules, stores, wishes, dates)
 
-        # On retry, append violation feedback to prompt
         if last_violations:
             violation_text = format_violations(last_violations)
             prompt += (
@@ -591,22 +706,23 @@ def call_claude_for_shift(staff, rules, stores, wishes, dates):
         response = claude_api(prompt, system)
         result = _parse_claude_response(response)
 
-        print(f"  Schedule generated for {len(result['schedule'])} staff")
+        schedule_days = result.get("schedule", [])
+        print(f"  Schedule generated: {len(schedule_days)} days")
         if result.get("notes"):
             print(f"  Notes: {result['notes']}")
 
-        # Validate
-        violations = validate_schedule(result["schedule"], staff, rules, dates, wishes)
+        # Convert to legacy format for validation
+        legacy_schedule = _convert_to_legacy_schedule(result, staff, dates)
+        violations = validate_schedule(legacy_schedule, staff, rules, dates, wishes_flat)
         print(f"  Validation: {format_violations(violations)}")
 
         if not has_hard_violations(violations):
-            result["_violations"] = violations  # keep soft warnings
+            result["_violations"] = violations
             return result
 
         last_violations = violations
         print(f"  Hard violations found, {'retrying...' if attempt < MAX_GENERATION_RETRIES else 'giving up.'}")
 
-    # All retries exhausted - flag for human review
     result["_violations"] = last_violations
     result["_needs_human_review"] = True
     print("  WARNING: Hard violations remain after all retries. Flagging for human review.")
@@ -614,162 +730,228 @@ def call_claude_for_shift(staff, rules, stores, wishes, dates):
 
 
 # ---------------------------------------------------------------------------
-# (5) Write results to 'シフト出力' sheet
+# (5) Write results to 'シフト出力' sheet (store-based layout)
 # ---------------------------------------------------------------------------
 
-def write_shift_output(schedule_result, staff, dates, period_start, period_end):
-    """Write shift schedule to 'シフト出力' sheet."""
+def _build_column_layout(stores, staff_groups):
+    """Build column layout matching reference spreadsheet format.
+
+    Returns:
+        columns: list of dicts describing each column
+        store_headers: list for the store header row
+        sub_headers: list for the sub-header row
+    """
+    retail_stores = [s for s in stores if s.get("種別") == "店舗（営業）"]
+    other_stores = [s for s in stores if s.get("種別") != "店舗（営業）"]
+
+    columns = []
+    store_headers = []
+    sub_headers = []
+
+    # System columns (A-D): 確定, 変更, date, day
+    for key in ["confirmed", "changed", "date", "day"]:
+        columns.append({"type": "system", "key": key})
+    store_headers.extend(["", "", "", ""])
+    sub_headers.extend(["", "", "", ""])
+
+    # Store assignment section: retail stores have 早番/遅番, others have single col
+    for store in retail_stores:
+        name = store["店舗名"]
+        columns.append({"type": "store_early", "store": name})
+        columns.append({"type": "store_late", "store": name})
+        columns.append({"type": "spacer"})
+        store_headers.extend([name, "", ""])
+        sub_headers.extend(["早番", "遅番", ""])
+
+    for store in other_stores:
+        name = store["店舗名"]
+        columns.append({"type": "store_single", "store": name})
+        columns.append({"type": "spacer"})
+        store_headers.extend([name, ""])
+        sub_headers.extend(["", ""])
+
+    # Individual time section: grouped by store
+    all_stores_ordered = retail_stores + other_stores
+    for store in all_stores_ordered:
+        name = store["店舗名"]
+        group = staff_groups.get(name, [])
+        if not group:
+            continue
+        first = True
+        for staff_name in group:
+            columns.append({"type": "individual", "store": name, "staff": staff_name})
+            store_headers.append(name if first else "")
+            sub_headers.append(staff_name)
+            first = False
+        columns.append({"type": "spacer"})
+        store_headers.append("")
+        sub_headers.append("")
+
+    return columns, store_headers, sub_headers
+
+
+def write_shift_output(schedule_result, staff, stores, dates, period_start, period_end):
+    """Write shift schedule to 'シフト出力' sheet in store-based format."""
     schedule = schedule_result["schedule"]
+    staff_groups = schedule_result.get("staff_groups", {})
 
-    # Clear entire sheet
-    sheets_clear("シフト出力!A1:S100")
+    # Fallback: if no staff_groups, put all staff under first store
+    if not staff_groups:
+        all_names = [s["氏名"] for s in staff]
+        if stores:
+            staff_groups = {stores[0]["店舗名"]: all_names}
+        else:
+            staff_groups = {"スタッフ": all_names}
 
-    # Build rows
+    # Build column layout
+    columns, store_headers, sub_headers = _build_column_layout(stores, staff_groups)
+
+    # Clear sheet
+    end_col_letter = col_letter(max(len(columns) - 1, 25))
+    sheets_clear(f"シフト出力!A1:{end_col_letter}200")
+
     all_rows = []
 
-    # Row 1: title
-    all_rows.append(["シフト期間", f"{period_start} ~ {period_end}"])
+    # Row 1: metadata + year/month
+    meta_pad = [""] * max(0, len(columns) - 6)
+    year = period_start.split("-")[0]
+    month = str(int(period_start.split("-")[1]))
+    all_rows.append(["シフト期間", f"{period_start} ~ {period_end}", year, "年", month, "月"] + meta_pad)
 
-    # Row 2-3: approval placeholders (filled by GAS on approval)
-    all_rows.append(["承認者", ""])
-    all_rows.append(["承認日時", ""])
+    # Row 2: store headers
+    all_rows.append(store_headers)
 
-    # Row 4: schedule_version placeholder (filled by GAS on approval)
-    all_rows.append(["schedule_version", ""])
+    # Row 3: sub-headers (早番/遅番 + staff names)
+    all_rows.append(sub_headers)
 
-    # Row 5: 承認ステータス placeholder (filled by GAS on approval)
-    all_rows.append(["承認ステータス", ""])
+    # Compute rest day counts per staff (for label row)
+    staff_rest_counts = {}
+    for day_data in schedule:
+        working = set(day_data.get("times", {}).keys())
+        for sg_staff_list in staff_groups.values():
+            for sname in sg_staff_list:
+                if sname not in staff_rest_counts:
+                    staff_rest_counts[sname] = 0
+                if sname not in working:
+                    staff_rest_counts[sname] += 1
 
-    # Row 6: date headers (A6=staff_id, B6=スタッフ名, C6~P6=dates, Q6=出勤日数, R6=合計勤務時間)
-    date_headers = [f"{d}\n({day_label(d)})" for d in dates]
-    header_row = [STAFF_ID_COLUMN, "スタッフ名"] + date_headers + ["出勤日数", "合計勤務時間"]
-    all_rows.append(header_row)
+    # Row 4: column labels (確定/変更/blank/休日) + rest day counts
+    label_row = [""] * len(columns)
+    label_row[0] = "確定"
+    label_row[1] = "変更"
+    label_row[3] = "休日"
+    for i, col in enumerate(columns):
+        if col["type"] == "individual":
+            staff_name = col["staff"]
+            rest_count = staff_rest_counts.get(staff_name, 0)
+            label_row[i] = str(rest_count) if rest_count else ""
+    all_rows.append(label_row)
 
-    # Row 7+: staff data
-    for s in staff:
-        staff_id = s.get(STAFF_ID_COLUMN, "")
-        name = s.get("氏名", "")
-        days = schedule.get(name, ["休み"] * len(dates))
-        # Ensure correct length
-        days = (days + ["休み"] * len(dates))[:len(dates)]
-        work_days = sum(1 for d in days if d == "出勤")
-        work_hours = work_days * 8
-        row = [staff_id, name] + days + [str(work_days), f"{work_hours}h"]
+    for day_data in schedule:
+        date_str = day_data["date"]
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        date_label = f"{d.month}/{d.day}"
+        dow = day_label(date_str)
+
+        store_assignments = day_data.get("stores", {})
+        times = day_data.get("times", {})
+
+        row = []
+        for col in columns:
+            ctype = col["type"]
+            if ctype == "system":
+                if col["key"] == "confirmed":
+                    row.append("FALSE")
+                elif col["key"] == "changed":
+                    row.append("FALSE")
+                elif col["key"] == "date":
+                    row.append(date_label)
+                elif col["key"] == "day":
+                    row.append(dow)
+            elif ctype == "store_early":
+                assignments = store_assignments.get(col["store"], {})
+                if isinstance(assignments, dict):
+                    row.append(assignments.get("早番", ""))
+                else:
+                    row.append(assignments[0] if assignments else "")
+            elif ctype == "store_late":
+                assignments = store_assignments.get(col["store"], {})
+                if isinstance(assignments, dict):
+                    row.append(assignments.get("遅番", ""))
+                else:
+                    row.append(assignments[1] if len(assignments) > 1 else "")
+            elif ctype == "store_single":
+                assignments = store_assignments.get(col["store"], [])
+                if isinstance(assignments, list):
+                    row.append(", ".join(assignments))
+                elif isinstance(assignments, dict):
+                    vals = [v for v in assignments.values() if v]
+                    row.append(", ".join(vals))
+                else:
+                    row.append(str(assignments))
+            elif ctype == "individual":
+                row.append(times.get(col["staff"], ""))
+            elif ctype == "spacer":
+                row.append("")
+
         all_rows.append(row)
 
     # Write all data
-    end_row = 6 + len(staff)
-    end_col = chr(ord("A") + len(dates) + 3)  # +3 for staff_id, name, counts
+    end_col = col_letter(len(columns) - 1)
+    end_row = len(all_rows)
     sheets_write(f"シフト出力!A1:{end_col}{end_row}", all_rows)
-    print(f"  Written shift output: {len(staff)} staff x {len(dates)} days")
+    print(f"  Written shift output: {len(dates)} days, {len(columns)} columns")
 
-    return end_row
+    return end_row, len(columns)
 
 
-def apply_conditional_formatting(dates, end_row):
-    """Apply conditional formatting to the shift output sheet.
+def apply_formatting(stores, staff_groups, end_row, num_columns):
+    """Apply formatting to the shift output sheet."""
+    columns, _, _ = _build_column_layout(stores, staff_groups)
 
-    出勤=green, 休み=white, 希望休=yellow
-    """
-    num_dates = len(dates)
-    # Data range: C7 to P{end_row} (columns 2-15, rows 6-end_row, 0-indexed)
-    data_range = {
-        "sheetId": SHEET_ID_OUTPUT,
-        "startRowIndex": 6,       # row 7 (0-indexed)
-        "endRowIndex": end_row,   # exclusive
-        "startColumnIndex": 2,    # column C (shifted by staff_id col)
-        "endColumnIndex": 2 + num_dates,  # column P+1
-    }
+    format_requests = []
 
-    # Delete existing conditional format rules on this sheet first
-    requests = [
-        {
-            "deleteConditionalFormatRule": {
-                "sheetId": SHEET_ID_OUTPUT,
-                "index": 0,
-            }
-        }
-    ]
-    # Try to delete up to 10 existing rules (ignore errors)
+    # Delete existing conditional format rules
     try:
         for _ in range(10):
-            sheets_batch_update(requests)
+            sheets_batch_update([{
+                "deleteConditionalFormatRule": {
+                    "sheetId": SHEET_ID_OUTPUT,
+                    "index": 0,
+                }
+            }])
     except Exception:
         pass
 
-    # Add new rules
-    format_requests = [
-        # 出勤 -> green
-        {
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [data_range],
-                    "booleanRule": {
-                        "condition": {
-                            "type": "TEXT_EQ",
-                            "values": [{"userEnteredValue": "出勤"}],
-                        },
-                        "format": {
-                            "backgroundColor": {
-                                "red": 0.71, "green": 0.88, "blue": 0.70, "alpha": 1,
-                            },
-                        },
-                    },
-                },
-                "index": 0,
-            }
-        },
-        # 希望休 -> yellow
-        {
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [data_range],
-                    "booleanRule": {
-                        "condition": {
-                            "type": "TEXT_EQ",
-                            "values": [{"userEnteredValue": "希望休"}],
-                        },
-                        "format": {
-                            "backgroundColor": {
-                                "red": 1.0, "green": 0.95, "blue": 0.60, "alpha": 1,
-                            },
-                        },
-                    },
-                },
-                "index": 1,
-            }
-        },
-        # 休み -> white
-        {
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [data_range],
-                    "booleanRule": {
-                        "condition": {
-                            "type": "TEXT_EQ",
-                            "values": [{"userEnteredValue": "休み"}],
-                        },
-                        "format": {
-                            "backgroundColor": {
-                                "red": 1.0, "green": 1.0, "blue": 1.0, "alpha": 1,
-                            },
-                        },
-                    },
-                },
-                "index": 2,
-            }
-        },
-    ]
-
-    # Also format header row (row 6) bold + center
+    # Bold + center for store header row (row 2, index 1)
     format_requests.append({
         "repeatCell": {
             "range": {
                 "sheetId": SHEET_ID_OUTPUT,
-                "startRowIndex": 5,
-                "endRowIndex": 6,
+                "startRowIndex": 1,
+                "endRowIndex": 2,
                 "startColumnIndex": 0,
-                "endColumnIndex": 2 + len(generate_dates("2099-01-01", "2099-01-01")) + 16,
+                "endColumnIndex": num_columns,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "textFormat": {"bold": True, "fontSize": 11},
+                    "horizontalAlignment": "CENTER",
+                }
+            },
+            "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
+        }
+    })
+
+    # Bold + center for sub-header row (row 3, index 2) and label row (row 4, index 3)
+    format_requests.append({
+        "repeatCell": {
+            "range": {
+                "sheetId": SHEET_ID_OUTPUT,
+                "startRowIndex": 2,
+                "endRowIndex": 4,
+                "startColumnIndex": 0,
+                "endColumnIndex": num_columns,
             },
             "cell": {
                 "userEnteredFormat": {
@@ -781,7 +963,7 @@ def apply_conditional_formatting(dates, end_row):
         }
     })
 
-    # Format title row bold
+    # Title row bold + larger font
     format_requests.append({
         "repeatCell": {
             "range": {
@@ -800,10 +982,16 @@ def apply_conditional_formatting(dates, end_row):
         }
     })
 
-    # Center-align data cells
+    # Center-align data area (row 5+, all columns)
     format_requests.append({
         "repeatCell": {
-            "range": data_range,
+            "range": {
+                "sheetId": SHEET_ID_OUTPUT,
+                "startRowIndex": 4,
+                "endRowIndex": end_row,
+                "startColumnIndex": 0,
+                "endColumnIndex": num_columns,
+            },
             "cell": {
                 "userEnteredFormat": {
                     "horizontalAlignment": "CENTER",
@@ -813,8 +1001,73 @@ def apply_conditional_formatting(dates, end_row):
         }
     })
 
+    # Light blue background for store assignment section headers (row 2-3)
+    store_col_start = 4  # After system cols A-D
+    store_col_end = store_col_start
+    for col in columns[4:]:
+        if col["type"] in ("store_early", "store_late", "store_single", "spacer"):
+            store_col_end += 1
+        else:
+            break
+
+    if store_col_end > store_col_start:
+        format_requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": SHEET_ID_OUTPUT,
+                    "startRowIndex": 1,
+                    "endRowIndex": 3,
+                    "startColumnIndex": store_col_start,
+                    "endColumnIndex": store_col_end,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {
+                            "red": 0.85, "green": 0.92, "blue": 1.0, "alpha": 1,
+                        },
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor)",
+            }
+        })
+
+    # Light yellow background for individual time section headers (row 2-3)
+    indiv_col_start = store_col_end
+    if indiv_col_start < num_columns:
+        format_requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": SHEET_ID_OUTPUT,
+                    "startRowIndex": 1,
+                    "endRowIndex": 3,
+                    "startColumnIndex": indiv_col_start,
+                    "endColumnIndex": num_columns,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {
+                            "red": 1.0, "green": 0.97, "blue": 0.85, "alpha": 1,
+                        },
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor)",
+            }
+        })
+
+    # Auto-resize columns
+    format_requests.append({
+        "autoResizeDimensions": {
+            "dimensions": {
+                "sheetId": SHEET_ID_OUTPUT,
+                "dimension": "COLUMNS",
+                "startIndex": 0,
+                "endIndex": num_columns,
+            }
+        }
+    })
+
     sheets_batch_update(format_requests)
-    print("  Conditional formatting applied (出勤:green, 休み:white, 希望休:yellow)")
+    print("  Formatting applied (headers, alignment, colors)")
 
 
 # ---------------------------------------------------------------------------
@@ -852,20 +1105,23 @@ def run(period_start=None, period_end=None):
         # (2) Fetch wishes from kintone
         print("[2/5] Fetching wish records from kintone...")
         wishes = fetch_wishes(period_start, period_end)
+        dates = generate_dates(period_start, period_end)
 
-        # (3) Write wishes to sheet
+        # (3) Write wishes to sheet (grid format)
         print("[3/5] Writing wishes to '希望収集データ' sheet...")
-        write_wishes_to_sheet(wishes)
+        write_wishes_to_sheet(wishes, staff, dates)
 
         # (4) Generate shift with Claude API
         print("[4/5] Generating shift schedule with Claude API...")
-        dates = generate_dates(period_start, period_end)
         schedule_result = call_claude_for_shift(staff, rules, stores, wishes, dates)
 
-        # (5) Write to output sheet
+        # (5) Write to output sheet (store-based format)
         print("[5/5] Writing results to 'シフト出力' sheet...")
-        end_row = write_shift_output(schedule_result, staff, dates, period_start, period_end)
-        apply_conditional_formatting(dates, end_row)
+        staff_groups = schedule_result.get("staff_groups", {})
+        end_row, num_cols = write_shift_output(
+            schedule_result, staff, stores, dates, period_start, period_end
+        )
+        apply_formatting(stores, staff_groups, end_row, num_cols)
 
         if schedule_result.get("_needs_human_review"):
             print(f"\n=== Shift generation complete (NEEDS HUMAN REVIEW) ===")

@@ -30,7 +30,6 @@ FIELD_MAP = {
     "staff_id": "staff_id",
     "氏名": "name",
     "雇用形態": "employment_type",
-    "対応店舗": "store",
     "働き方": "shift_type",
     "役職": "position",
     "最大労働時間/週": "max_hours_per_week",
@@ -38,6 +37,7 @@ FIELD_MAP = {
     "Slack ID": "slack_id",
     "LINE UID": "line_uid",
     "有効フラグ": "active",
+    "メイン店舗": "main_store",
 }
 
 
@@ -218,7 +218,7 @@ def slack_notify(text):
 
 def read_spreadsheet_staff():
     """Read staff master from spreadsheet. Returns list of dicts."""
-    rows = sheets_read("スタッフマスタ!A1:L100")
+    rows = sheets_read("スタッフマスタ!A1:P100")
     if not rows:
         raise RuntimeError("スタッフマスタが空です")
 

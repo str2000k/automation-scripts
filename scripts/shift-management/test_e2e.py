@@ -72,10 +72,12 @@ TEST_STAFF = [
     },
 ]
 
-# Spreadsheet column headers for スタッフマスタ (12 columns)
+# Spreadsheet column headers for スタッフマスタ (11 columns + 5 store checkboxes)
 STAFF_MASTER_HEADERS = [
-    "staff_id", "氏名", "雇用形態", "対応店舗", "働き方", "役職",
-    "最大労働時間/週", "強制出勤日", "個人ルール", "Slack ID", "LINE UID", "有効フラグ",
+    "staff_id", "氏名", "雇用形態", "働き方", "役職",
+    "Slack ID", "LINE UID", "有効フラグ",
+    "藤沢", "伊勢佐木町", "新宿", "工場", "本部オフィス",
+    "個人ルール",
 ]
 
 
@@ -476,7 +478,7 @@ def test_01_register_test_staff():
     state.staff_master_rows_added = len(rows)
 
     # Verify
-    all_rows = sheets_read("スタッフマスタ!A1:L100")
+    all_rows = sheets_read("スタッフマスタ!A1:N100")
     found_ids = set()
     for row in all_rows:
         if row and row[0] in ("T001", "T002", "T003"):
@@ -872,9 +874,9 @@ def cleanup():
     print("\n=== Cleanup ===")
     errors = []
 
-    # 1. Remove test staff from スタッフマスタ (12-column format)
+    # 1. Remove test staff from スタッフマスタ (14-column format)
     try:
-        rows = sheets_read("スタッフマスタ!A1:L100")
+        rows = sheets_read("スタッフマスタ!A1:N100")
         rows_to_clear = []
         for i, row in enumerate(rows):
             if row and row[0] in ("T001", "T002", "T003"):

@@ -221,7 +221,11 @@ def check_all_submitted(period_start, period_end, all_staff):
 # ---------------------------------------------------------------------------
 
 def build_shift_input_blocks(staff_id, staff_name, period_start, period_end, deadline):
-    """Build Block Kit blocks with per-day shift buttons for DM."""
+    """Build Block Kit blocks with per-day shift buttons for DM.
+
+    Step 1: [出勤] [休み] [希望休]
+    Step 2 (after 出勤): [フル 10-19] [早番 10-15] [遅番 14-19] [戻る]
+    """
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
 
     blocks = [
@@ -241,7 +245,7 @@ def build_shift_input_blocks(staff_id, staff_name, period_start, period_end, dea
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "各日付のシフト希望をボタンで選択してください👇",
+                "text": "各日付のシフト希望をボタンで選択してください👇\n出勤を選ぶと時間帯を選べます。",
             },
         },
     ]
@@ -297,6 +301,92 @@ def build_shift_input_blocks(staff_id, staff_name, period_start, period_end, dea
     })
 
     return blocks
+
+
+def build_fixed_shift_blocks(staff_id, staff_name, period_start, period_end, deadline):
+    """Build Block Kit blocks for fixed-shift staff to request days off."""
+    count_options = [
+        {"text": {"type": "plain_text", "text": f"{n}日"}, "value": str(n)}
+        for n in range(1, 9)
+    ]
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "📅 希望休の入力"},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*対象期間:*\n{period_start} 〜 {period_end}"},
+                {"type": "mrkdwn", "text": f"*回答期限:*\n{deadline}"},
+            ],
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "希望休がある場合は日数を選んで日付を入力してください。\n希望休がない場合は「希望休なし」を押してください。",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "fixed_actions",
+            "elements": [
+                {
+                    "type": "static_select",
+                    "action_id": "fixedcount",
+                    "placeholder": {"type": "plain_text", "text": "希望休の日数"},
+                    "options": count_options,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "希望休なし"},
+                    "value": f"{staff_id}|{period_start}|{period_end}",
+                    "action_id": "fixednone",
+                },
+            ],
+        },
+        {"type": "divider"},
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"kintoneでも入力できます: <https://ny76p.cybozu.com/k/211/|シフト希望収集アプリ>"},
+            ],
+        },
+    ]
+    return blocks
+
+
+def send_fixed_shift_dm(staff, period_start, period_end, deadline):
+    """Send fixed-shift day-off request DM to a staff member."""
+    slack_id = _get_slack_id(staff)
+    if not slack_id:
+        print(f"  [SKIP] {_get_name(staff)}: slack_id未設定")
+        return
+
+    staff_id = _get_staff_id(staff)
+    staff_name = _get_name(staff)
+
+    blocks = build_fixed_shift_blocks(
+        staff_id=staff_id,
+        staff_name=staff_name,
+        period_start=period_start,
+        period_end=period_end,
+        deadline=deadline,
+    )
+
+    result = slack_api("chat.postMessage", json_body={
+        "channel": slack_id,
+        "blocks": blocks,
+        "text": f"【希望休入力のお願い】{period_start}〜{period_end} 回答期限: {deadline}",
+    })
+
+    if result.get("ok"):
+        print(f"  [SENT] {staff_name}（{slack_id}）へ固定シフト用DM送信")
+    else:
+        print(f"  [ERROR] {staff_name}: {result.get('error')}")
 
 
 def send_shift_input_dm(staff, period_start, period_end, deadline):
@@ -377,11 +467,8 @@ def build_collect_message(period_start, period_end, deadline, staff_list):
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    "このスレッドに以下の形式で返信してください:\n"
-                    "```\n"
-                    "希望休: 2026-03-16, 2026-03-20\n"
-                    "備考: 午前のみ希望（3/18）\n"
-                    "```"
+                    "Slackアプリ上のDMからボタンで入力してください。\n"
+                    "各日付ごとに出勤（時間帯選択）/ 休み / 希望休を選べます。"
                 ),
             },
         },

@@ -174,75 +174,83 @@ def sheets_read(range_name):
 # ---------------------------------------------------------------------------
 
 def read_shift_output():
-    """Read approved shift data from 'シフト出力' sheet.
+    """Read shift data from 'シフト出力' sheet (store-based format).
 
-    Returns (period, approver, approval_time, shift_data).
-    shift_data is list of dicts with keys: name, schedule (list of 14 statuses),
-    work_days, off_days, wish_off_days, total_work, total_hours.
+    Layout:
+      Row 1: metadata (シフト期間 + year/month dropdowns)
+      Row 2: store group headers
+      Row 3: sub-headers (早番, 遅番, ..., staff_names)
+      Row 4: label row (確定, 変更, blank, 休日) + rest day counts
+      Row 5+: data rows (FALSE, FALSE, M/D, dow, name, name, ..., time, time, ...)
+
+    Returns (period, approver, approval_time, schedule_version, dates, shift_data).
+    shift_data is list of dicts per staff with work/off info and time schedules.
     """
-    rows = sheets_read("シフト出力!A1:R100")
-    if len(rows) < 7:
+    rows = sheets_read("シフト出力!A1:BZ200")
+    if len(rows) < 5:
         raise RuntimeError("シフト出力シートにデータがありません")
 
-    # Row 1: period
+    # Row 1: metadata
     period = rows[0][1] if len(rows[0]) > 1 else ""
-    # Row 2: approver
-    approver = rows[1][1] if len(rows) > 1 and len(rows[1]) > 1 else ""
-    # Row 3: approval time
-    approval_time = rows[2][1] if len(rows) > 2 and len(rows[2]) > 1 else ""
-    # Row 4: schedule_version
-    schedule_version = rows[3][1] if len(rows) > 3 and len(rows[3]) > 1 else ""
-    # Row 5: 承認ステータス (skipped)
+    approver = ""
+    approval_time = ""
+    schedule_version = ""
 
-    if not approver:
-        raise RuntimeError("シフトが未承認です。先に承認してください。")
+    # Row 3 (index 2): sub-headers with staff names
+    sub_header = rows[2] if len(rows) > 2 else []
+    # Row 4 (index 3): label row (確定/変更/blank/休日) - skip
 
-    # Row 6: date headers (C6~P6, A6=staff_id, B6=スタッフ名)
-    header_row = rows[5]
+    # Identify individual staff columns (not system/store labels)
+    system_labels = {"確定", "変更", "", "早番", "遅番", "休日"}
+    staff_columns = {}  # col_idx -> staff_name
+    for i, label in enumerate(sub_header):
+        if label and label not in system_labels:
+            staff_columns[i] = label
+
+    # Extract dates from data rows (column C = index 2), starting at row 5 (index 4)
+    data_rows = rows[4:]
     dates = []
-    for i in range(2, min(16, len(header_row))):
-        # "2026-03-09\n(月)" -> "2026-03-09"
-        date_str = str(header_row[i]).split("\n")[0].strip()
-        if date_str and len(date_str) == 10:
-            dates.append(date_str)
+    # Parse year from period string "YYYY-MM-DD ~ YYYY-MM-DD"
+    year = period.split("-")[0].strip() if period and "-" in period else str(datetime.now().year)
+    for row in data_rows:
+        if len(row) > 2 and row[2]:
+            date_label = str(row[2]).strip()
+            if "/" in date_label:
+                parts = date_label.split("/")
+                try:
+                    dates.append(f"{year}-{int(parts[0]):02d}-{int(parts[1]):02d}")
+                except (ValueError, IndexError):
+                    dates.append(date_label)
 
-    # Row 7+: staff data
+    # Build per-staff data from individual time columns
     shift_data = []
-    for row in rows[6:]:
-        if not row or not row[0]:
-            continue
-        staff_id = row[0]
-        name = row[1] if len(row) > 1 else ""
-        schedule = []
+    for col_idx, staff_name in staff_columns.items():
         work_days = []
         off_days = []
-        wish_off_days = []
+        times_map = {}
 
-        for d in range(len(dates)):
-            col_idx = d + 2  # shifted by staff_id + name columns
-            status = row[col_idx] if col_idx < len(row) else "休み"
-            schedule.append(status)
+        for row_idx, row in enumerate(data_rows):
+            if row_idx >= len(dates):
+                break
+            date = dates[row_idx]
+            time_val = row[col_idx] if col_idx < len(row) else ""
 
-            date_label = dates[d]
-            if status == "出勤":
-                work_days.append(date_label)
-            elif status == "希望休":
-                wish_off_days.append(date_label)
+            if time_val:
+                work_days.append(date)
+                times_map[date] = time_val
             else:
-                off_days.append(date_label)
-
-        total_work = row[len(dates) + 2] if len(row) > len(dates) + 2 else str(len(work_days))
-        total_hours = row[len(dates) + 3] if len(row) > len(dates) + 3 else f"{len(work_days) * 8}h"
+                off_days.append(date)
 
         shift_data.append({
-            "staff_id": staff_id,
-            "name": name,
-            "schedule": schedule,
+            "staff_id": "",  # looked up from staff_master later
+            "name": staff_name,
+            "schedule": [],
             "work_days": work_days,
             "off_days": off_days,
-            "wish_off_days": wish_off_days,
-            "total_work": total_work,
-            "total_hours": total_hours,
+            "wish_off_days": [],
+            "total_work": str(len(work_days)),
+            "total_hours": f"{len(work_days) * 8}h",
+            "times": times_map,
         })
 
     return period, approver, approval_time, schedule_version, dates, shift_data
@@ -250,7 +258,7 @@ def read_shift_output():
 
 def read_staff_master():
     """Read staff master keyed by staff_id. Also builds name->staff_id map."""
-    rows = sheets_read("スタッフマスタ!A1:L100")
+    rows = sheets_read("スタッフマスタ!A1:P100")
     if not rows:
         return {}
 
@@ -301,22 +309,43 @@ def build_channel_message(period, approver, approval_time, shift_data):
 def build_individual_message(staff_entry, period):
     """Build individual notification message for a staff member."""
     s = staff_entry
-    work_list = ", ".join(s["work_days"]) if s["work_days"] else "なし"
-    off_list = ", ".join(s["off_days"]) if s["off_days"] else "なし"
-    wish_off_list = ", ".join(s["wish_off_days"]) if s["wish_off_days"] else ""
+    times_map = s.get("times", {})
+
+    # Build work schedule with times
+    work_lines = []
+    dow_names = ["月", "火", "水", "木", "金", "土", "日"]
+    for date in s["work_days"]:
+        try:
+            d = datetime.strptime(date, "%Y-%m-%d")
+            dow = dow_names[d.weekday()]
+            short_date = f"{d.month}/{d.day}({dow})"
+        except ValueError:
+            short_date = date
+        time_str = times_map.get(date, "")
+        if time_str:
+            work_lines.append(f"  {short_date} {time_str}")
+        else:
+            work_lines.append(f"  {short_date}")
+
+    off_lines = []
+    for date in s["off_days"]:
+        try:
+            d = datetime.strptime(date, "%Y-%m-%d")
+            dow = dow_names[d.weekday()]
+            off_lines.append(f"  {d.month}/{d.day}({dow})")
+        except ValueError:
+            off_lines.append(f"  {date}")
 
     text = (
         f"シフト確定通知\n\n"
         f"{s['name']}さん\n\n"
         f"対象期間: {period}\n\n"
-        f"出勤日 ({s['total_work']}日 / {s['total_hours']}):\n"
-        f"  {work_list}\n\n"
-        f"休日:\n"
-        f"  {off_list}\n"
+        f"出勤日 ({s['total_work']}日):\n"
+        + ("\n".join(work_lines) if work_lines else "  なし")
+        + f"\n\n休日:\n"
+        + ("\n".join(off_lines) if off_lines else "  なし")
+        + "\n"
     )
-
-    if wish_off_list:
-        text += f"\n希望休(反映済):\n  {wish_off_list}\n"
 
     text += f"\nkintone: {KINTONE_APP_URL}"
 
@@ -434,16 +463,20 @@ def run(schedule_version=None):
             period_start = period.split("~")[0].strip() if "~" in period else period
             sync_outbox.create_version(period_start, approver)
 
-        staff_map = None
+        # Read staff master early (needed for staff_id lookup and notifications)
+        print("[2/3] Reading staff master...")
+        staff_map = read_staff_master()
+        print(f"  Staff master: {len(staff_map)} entries")
+
+        # Resolve staff_id for shift_data entries (new format doesn't have it in sheet)
+        name_to_sid = {v.get("氏名", ""): k for k, v in staff_map.items()}
+        for s in shift_data:
+            if not s["staff_id"] and s["name"]:
+                s["staff_id"] = name_to_sid.get(s["name"], "")
 
         # Check if slack destination should run
         if version and not sync_outbox.should_run(version, "slack"):
             print("  Slack already sent for this version, skipping.")
-        else:
-            # Read staff master for Slack IDs and LINE UIDs
-            print("[2/3] Reading staff master...")
-            staff_map = read_staff_master()
-            print(f"  Staff master: {len(staff_map)} entries")
 
             # Send Slack notifications
             print("[3/3] Sending Slack notifications...")

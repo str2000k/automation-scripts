@@ -206,58 +206,136 @@ def slack_notify_error(location, error):
 # Read shift data from spreadsheet
 # ---------------------------------------------------------------------------
 
+def read_staff_master():
+    """Read staff master keyed by name. Returns {name: {staff_id, ...}}."""
+    rows = sheets_read("スタッフマスタ!A1:P100")
+    if not rows:
+        return {}
+    header = rows[0]
+    name_map = {}
+    for row in rows[1:]:
+        if not row or not row[0]:
+            continue
+        row += [""] * (len(header) - len(row))
+        d = {header[i]: row[i] for i in range(len(header))}
+        name = d.get("氏名", "")
+        if name and d.get("有効フラグ", "") != "無効":
+            name_map[name] = d
+    return name_map
+
+
 def read_shift_output():
-    """Read approved shift data from 'シフト出力' sheet.
+    """Read shift data from 'シフト出力' sheet (store-based format).
+
+    Layout:
+      Row 1: metadata (シフト期間 + year/month dropdowns)
+      Row 2: store group headers
+      Row 3: sub-headers (早番, 遅番, ..., staff_names)
+      Row 4: label row (確定, 変更, blank, 休日) + rest day counts
+      Row 5+: data rows
 
     Returns (period_start, period_end, approver, approved_at, schedule_version,
              dates, staff_data).
-    staff_data: list of {"staff_id", "name", "days": [{date, status}]}
+    staff_data: list of {"staff_id", "name", "days": [{date, status, time, store}]}
     """
-    rows = sheets_read("シフト出力!A1:R100")
-    if len(rows) < 6:
+    rows = sheets_read("シフト出力!A1:BZ200")
+    if len(rows) < 5:
         raise RuntimeError("シフト出力シートにデータがありません")
 
-    # Row 1 (B1): period "2026-03-09 ~ 2026-03-22"
+    # Row 1: metadata
     period_str = rows[0][1] if len(rows[0]) > 1 else ""
-    # Row 2 (B2): approver
-    approver = rows[1][1] if len(rows) > 1 and len(rows[1]) > 1 else ""
-    # Row 3 (B3): approved_at
-    approved_at = rows[2][1] if len(rows) > 2 and len(rows[2]) > 1 else ""
-    # Row 4 (B4): schedule_version
-    schedule_version = rows[3][1] if len(rows) > 3 and len(rows[3]) > 1 else ""
+    approver = ""
+    approved_at = ""
+    schedule_version = ""
 
-    if not approver:
-        raise RuntimeError("シフトが未承認です。先に承認してください。")
-
-    # Parse period_start / period_end from period_str
     period_parts = period_str.split("~")
     period_start = period_parts[0].strip() if len(period_parts) >= 1 else ""
     period_end = period_parts[1].strip() if len(period_parts) >= 2 else ""
 
-    # Row 5 (index 4): date headers (A5=staff_id, B5=スタッフ名, C5+=dates)
-    header_row = rows[4]
-    dates = []
-    for cell in header_row[2:]:  # skip staff_id and name columns
-        date_part = cell.split("\n")[0].strip() if cell else ""
-        if date_part and len(date_part) == 10:
-            dates.append(date_part)
+    # Row 2 (index 1): store headers
+    store_header = rows[1] if len(rows) > 1 else []
+    # Row 3 (index 2): sub-headers
+    sub_header = rows[2] if len(rows) > 2 else []
+    # Row 4 (index 3): label row (確定/変更/blank/休日) - skip
 
-    # Row 6+ (index 5+): staff data with per-day breakdown
+    # Identify staff columns (individual time section)
+    system_labels = {"確定", "変更", "", "早番", "遅番", "休日"}
+    staff_columns = {}  # col_idx -> staff_name
+    for i, label in enumerate(sub_header):
+        if label and label not in system_labels:
+            staff_columns[i] = label
+
+    # Identify store assignment columns for lookup
+    store_early_cols = {}  # col_idx -> store_name (早番)
+    store_late_cols = {}   # col_idx -> store_name (遅番)
+    for i, label in enumerate(sub_header):
+        if label == "早番" and i > 0:
+            # Find store name from store_header
+            for j in range(i, -1, -1):
+                if j < len(store_header) and store_header[j]:
+                    store_early_cols[i] = store_header[j]
+                    break
+        elif label == "遅番" and i > 0:
+            for j in range(i, -1, -1):
+                if j < len(store_header) and store_header[j]:
+                    store_late_cols[i] = store_header[j]
+                    break
+
+    # Read staff master for staff_id lookup
+    name_master = read_staff_master()
+
+    # Parse year from period
+    year = period_start.split("-")[0] if period_start else str(datetime.now().year)
+
+    # Extract dates and build per-staff data (row 5+ = index 4+)
+    data_rows = rows[4:]
+    dates = []
+    for row in data_rows:
+        if len(row) > 2 and row[2]:
+            dl = str(row[2]).strip()
+            if "/" in dl:
+                parts = dl.split("/")
+                try:
+                    dates.append(f"{year}-{int(parts[0]):02d}-{int(parts[1]):02d}")
+                except (ValueError, IndexError):
+                    dates.append(dl)
+
+    # Build per-staff data
     staff_data = []
-    for row in rows[5:]:
-        if not row or not row[0]:
-            continue
-        staff_id = row[0]
-        name = row[1] if len(row) > 1 else ""
+    for col_idx, staff_name in staff_columns.items():
+        master = name_master.get(staff_name, {})
+        staff_id = master.get("staff_id", "")
         days = []
-        for i, date in enumerate(dates):
-            col_idx = i + 2
-            status = row[col_idx] if col_idx < len(row) else "休み"
-            days.append({"date": date, "status": status})
+
+        for row_idx, row in enumerate(data_rows):
+            if row_idx >= len(dates):
+                break
+            date = dates[row_idx]
+            time_val = row[col_idx] if col_idx < len(row) else ""
+
+            # Find which store this person is assigned to on this day
+            store = ""
+            for ec, sn in store_early_cols.items():
+                if ec < len(row) and row[ec] == staff_name:
+                    store = sn
+                    break
+            if not store:
+                for lc, sn in store_late_cols.items():
+                    if lc < len(row) and row[lc] == staff_name:
+                        store = sn
+                        break
+
+            status = "出勤" if time_val else "休み"
+            days.append({
+                "date": date,
+                "status": status,
+                "time": time_val,
+                "store": store,
+            })
 
         staff_data.append({
             "staff_id": staff_id,
-            "name": name,
+            "name": staff_name,
             "days": days,
         })
 
@@ -308,6 +386,15 @@ def build_kintone_record_per_day(staff_id, staff_name, day_info, period_start,
     }
     if schedule_version:
         record["schedule_version"] = {"value": schedule_version}
+    # Store assignment and time range from new format
+    store = day_info.get("store", "")
+    if store:
+        record["store"] = {"value": store}
+    time_range = day_info.get("time", "")
+    if time_range and "-" in time_range:
+        parts = time_range.split("-")
+        record["start_time"] = {"value": parts[0].strip()}
+        record["end_time"] = {"value": parts[1].strip()}
     return record
 
 

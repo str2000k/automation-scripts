@@ -179,7 +179,7 @@ def sheets_read(range_name):
 
 def read_staff_master():
     """Read staff master keyed by staff_id."""
-    rows = sheets_read("スタッフマスタ!A1:L100")
+    rows = sheets_read("スタッフマスタ!A1:P100")
     if not rows:
         return {}
 

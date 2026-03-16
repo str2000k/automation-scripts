@@ -292,7 +292,7 @@ def read_shift_output():
 
 def read_staff_roles():
     """Read staff master to get role info. Returns {staff_id: role}."""
-    rows = sheets_read("スタッフマスタ!A1:L100")
+    rows = sheets_read("スタッフマスタ!A1:P100")
     if not rows:
         return {}
 
