@@ -311,7 +311,7 @@ def read_staff_master():
     Reads A1:N100. Checkbox columns I-M (store assignments).
     対応店舗 is computed from store checkbox columns at read time.
     """
-    rows = sheets_read("スタッフマスタ!A1:P100")
+    rows = sheets_read("スタッフマスタ!A1:Q100")
     if not rows:
         raise RuntimeError("スタッフマスタが空です")
 

@@ -208,7 +208,7 @@ def slack_notify_error(location, error):
 
 def read_staff_master():
     """Read staff master keyed by name. Returns {name: {staff_id, ...}}."""
-    rows = sheets_read("スタッフマスタ!A1:P100")
+    rows = sheets_read("スタッフマスタ!A1:Q100")
     if not rows:
         return {}
     header = rows[0]

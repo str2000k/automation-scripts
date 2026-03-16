@@ -258,7 +258,7 @@ def read_shift_output():
 
 def read_staff_master():
     """Read staff master keyed by staff_id. Also builds name->staff_id map."""
-    rows = sheets_read("スタッフマスタ!A1:P100")
+    rows = sheets_read("スタッフマスタ!A1:Q100")
     if not rows:
         return {}
 

@@ -218,7 +218,7 @@ def slack_notify(text):
 
 def read_spreadsheet_staff():
     """Read staff master from spreadsheet. Returns list of dicts."""
-    rows = sheets_read("スタッフマスタ!A1:P100")
+    rows = sheets_read("スタッフマスタ!A1:Q100")
     if not rows:
         raise RuntimeError("スタッフマスタが空です")
 

@@ -2014,62 +2014,116 @@ function syncToKintone_(confirmedDays, periodStart, periodEnd, approver, approve
 
 function syncToCalendar_(confirmedDays, year) {
   var calId = getProp_('SHIFT_CALENDAR_ID');
-  var cal;
-  if (calId) {
-    cal = CalendarApp.getCalendarById(calId);
-  } else {
-    cal = CalendarApp.getDefaultCalendar();
-  }
-  if (!cal) throw new Error('カレンダーが見つかりません。SHIFT_CALENDAR_IDを確認してください。');
+  if (!calId) throw new Error('SHIFT_CALENDAR_IDが設定されていません');
 
-  var byDate = {};
+  // Store title and color mapping
+  var storeConfig = {
+    '藤沢': { title: '藤沢店', colorId: '9' },
+    '伊勢佐木町': { title: '伊勢佐木町店', colorId: '10' },
+    '新宿': { title: '新宿店', colorId: '6' },
+    '工場': { title: '工場', colorId: '5' },
+    '本部オフィス': { title: '本部オフィス', colorId: '8' },
+    'EC': { title: 'EC', colorId: '3' },
+  };
+
+  // Build staff name → email mapping
+  var staffMaster = readStaffMaster_();
+  var nameToEmail = {};
+  staffMaster.forEach(function(s) {
+    if (s['メールアドレス']) nameToEmail[s['氏名']] = s['メールアドレス'];
+  });
+
+  // Group by date + store
+  var byDateStore = {};
   confirmedDays.forEach(function(d) {
-    if (d.shift_status === '公休') return; // 公休はカレンダーに登録しない
-    if (!byDate[d.date]) byDate[d.date] = [];
-    byDate[d.date].push(d);
+    if (d.shift_status === '公休') return;
+    var key = d.date + '_' + d.store;
+    if (!byDateStore[key]) byDateStore[key] = { date: d.date, store: d.store, staff: [] };
+    byDateStore[key].staff.push(d);
   });
 
   var deleted = 0, created = 0;
+  var token = ScriptApp.getOAuthToken();
 
-  for (var dateStr in byDate) {
+  // Delete existing events for affected dates
+  var processedDates = {};
+  for (var key in byDateStore) {
+    var dateStr = byDateStore[key].date;
+    if (processedDates[dateStr]) continue;
+    processedDates[dateStr] = true;
+
     var d = new Date(dateStr + 'T00:00:00');
     var nextDay = new Date(d);
     nextDay.setDate(nextDay.getDate() + 1);
 
-    var existingEvents = cal.getEvents(d, nextDay, { search: '[shift-sync]' });
-    existingEvents.forEach(function(ev) {
-      if (ev.getTitle().indexOf('[shift-sync]') >= 0) {
-        ev.deleteEvent();
-        deleted++;
+    // Search by store titles to find existing events
+    for (var storeName in storeConfig) {
+      var title = storeConfig[storeName].title;
+      try {
+        var cal = CalendarApp.getCalendarById(calId);
+        var existingEvents = cal.getEvents(d, nextDay, { search: title });
+        existingEvents.forEach(function(ev) {
+          if (ev.getTitle() === title) {
+            ev.deleteEvent();
+            deleted++;
+          }
+        });
+      } catch (e) {}
+    }
+  }
+
+  // Create new events via Calendar API (for colorId and attendees support)
+  for (var key in byDateStore) {
+    var entry = byDateStore[key];
+    var config = storeConfig[entry.store];
+    if (!config) continue;
+
+    // Build description
+    var descLines = [];
+    entry.staff.sort(function(a, b) { return (a.start_time || '99') < (b.start_time || '99') ? -1 : 1; });
+    entry.staff.forEach(function(s) {
+      if (s.start_time && s.end_time) {
+        descLines.push(s.start_time + '-' + s.end_time + ' ' + s.staff_name);
+      } else {
+        descLines.push(s.staff_name);
       }
     });
 
-    byDate[dateStr].forEach(function(entry) {
-      if (!entry.start_time || !entry.end_time) return;
+    // Build attendees
+    var attendees = [];
+    entry.staff.forEach(function(s) {
+      var email = nameToEmail[s.staff_name];
+      if (email) attendees.push({ email: email });
+    });
 
-      var startParts = entry.start_time.split(':');
-      var endParts = entry.end_time.split(':');
+    var nextDay = new Date(new Date(entry.date + 'T00:00:00'));
+    nextDay.setDate(nextDay.getDate() + 1);
+    var nextDayStr = Utilities.formatDate(nextDay, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 
-      var startDate = new Date(d);
-      startDate.setHours(parseInt(startParts[0]), parseInt(startParts[1] || '0'), 0, 0);
+    var event = {
+      summary: config.title,
+      description: descLines.join('\n'),
+      start: { date: entry.date },
+      end: { date: nextDayStr },
+      colorId: config.colorId,
+      attendees: attendees,
+    };
 
-      var endDate = new Date(d);
-      endDate.setHours(parseInt(endParts[0]), parseInt(endParts[1] || '0'), 0, 0);
-
-      if (endDate <= startDate) {
-        endDate.setDate(endDate.getDate() + 1);
-      }
-
-      var title = '[shift-sync] ' + entry.staff_name
-        + (entry.store ? ' @ ' + entry.store : '');
-
-      cal.createEvent(title, startDate, endDate, {
-        description: 'シフト: ' + entry.time_range
-          + '\n店舗: ' + (entry.store || '未定')
-          + '\nstaff_id: ' + entry.staff_id,
-      });
+    try {
+      UrlFetchApp.fetch(
+        'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) + '/events?sendUpdates=none',
+        {
+          method: 'post',
+          contentType: 'application/json',
+          headers: { 'Authorization': 'Bearer ' + token },
+          payload: JSON.stringify(event),
+          muteHttpExceptions: true,
+        }
+      );
       created++;
-    });
+    } catch (e) {
+      Logger.log('Calendar error: ' + e.message);
+    }
   }
 
   return { created: created, deleted: deleted };
