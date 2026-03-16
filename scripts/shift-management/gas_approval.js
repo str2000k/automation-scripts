@@ -54,14 +54,16 @@ var SN_OUTPUT = 'シフト出力';
 var DOW_JP = ['日', '月', '火', '水', '木', '金', '土'];
 
 // Layout constants
-var OUTPUT_HROWS = 4;
-var OUTPUT_DSTART = 5; // 1-indexed first data row
+var OUTPUT_HROWS = 3;
+var OUTPUT_DSTART = 4; // 1-indexed first data row
 var OUTPUT_DAYS = 31;
 var NON_RETAIL_START_COL = 22; // 非営業店舗セクション開始列 (1-indexed, V列)
 
 // Year/month selector positions (1-indexed)
-var YEAR_COL = 4;   // D1 (merged D1:E1)
-var MONTH_COL = 7;  // G1 (merged G1:H1)
+var YEAR_ROW = 1;   // A1
+var YEAR_COL = 1;   // A1
+var MONTH_ROW = 2;  // A2
+var MONTH_COL = 1;  // A2
 
 // Retail store column map (1-indexed) - FIXED
 // Each shift type: {n: name cell col, s: 出勤 time col, e: 退勤 time col}
@@ -138,20 +140,20 @@ function onEditTrigger(e) {
   var row = e.range.getRow();
   var col = e.range.getColumn();
 
-  // Year/month selector (Row 1)
-  if (row === 1) {
-    if (name === SN_OUTPUT && (col === YEAR_COL || col === MONTH_COL)) {
-      var year = String(sheet.getRange(1, YEAR_COL).getValue());
-      var month = String(sheet.getRange(1, MONTH_COL).getValue());
-      if (year && month) {
-        loadShiftOutputData_(year, month);
-      }
-    } else if (name === SN_WISH && (col === YEAR_COL || col === MONTH_COL)) {
-      var year = String(sheet.getRange(1, YEAR_COL).getValue());
-      var month = String(sheet.getRange(1, MONTH_COL).getValue());
-      if (year && month) {
-        loadWishSheetData_(year, month);
-      }
+  // Year/month selector: シフト出力 A1:B1=year(merged), A2:B2=month(merged)
+  if (name === SN_OUTPUT && (col === 1 || col === 2) && (row === YEAR_ROW || row === MONTH_ROW)) {
+    var year = String(sheet.getRange(YEAR_ROW, YEAR_COL).getValue()).trim();
+    var month = String(sheet.getRange(MONTH_ROW, MONTH_COL).getValue()).trim();
+    if (year && month) {
+      loadShiftOutputData_(year, month);
+    }
+    return;
+  }
+  if (name === SN_WISH && row === 1 && (col === 4 || col === 7)) {
+    var year = String(sheet.getRange(1, 4).getValue()).trim();
+    var month = String(sheet.getRange(1, 7).getValue()).trim();
+    if (year && month) {
+      loadWishSheetData_(year, month);
     }
     return;
   }
@@ -292,11 +294,16 @@ function loadShiftOutputData_(year, month) {
     }
   }
 
-  // Fetch kintone 212
-  var query = 'shift_date >= "' + firstDate + '" and shift_date <= "' + lastDate
-    + '" order by shift_date asc, staff_id asc limit 500';
-  var result = kintoneGet_(KINTONE_CONFIRMED_APP, query);
-  var records = result.records || [];
+  // Fetch kintone 212 (paginated to handle > 500 records)
+  var baseQuery = 'shift_date >= "' + firstDate + '" and shift_date <= "' + lastDate + '"';
+  var records = [];
+  for (var offset = 0; offset < 2000; offset += 500) {
+    var query = baseQuery + ' order by shift_date asc, staff_id asc limit 500 offset ' + offset;
+    var result = kintoneGet_(KINTONE_CONFIRMED_APP, query);
+    var batch = result.records || [];
+    records = records.concat(batch);
+    if (batch.length < 500) break;
+  }
   if (!records.length) {
     // Write grid even if no records (dates + weekend colors)
     outputSheet.getRange(OUTPUT_DSTART, 1, totalRows, OUTPUT_TOTAL_COLS).setValues(grid);
@@ -794,8 +801,8 @@ function generateDates_(startStr, endStr) {
 function getSelectedYearMonth_() {
   var s = sheet_(SN_OUTPUT);
   if (!s) return null;
-  var year = String(s.getRange(1, YEAR_COL).getValue()).trim();
-  var month = String(s.getRange(1, MONTH_COL).getValue()).trim();
+  var year = String(s.getRange(YEAR_ROW, YEAR_COL).getValue()).trim();
+  var month = String(s.getRange(MONTH_ROW, MONTH_COL).getValue()).trim();
   if (!year || !month) return null;
   return { year: year, month: month };
 }
@@ -819,8 +826,9 @@ function readNonRetailLayout_(outputSheet) {
   }
 
   var width = lastCol - NON_RETAIL_START_COL + 1;
-  var row2 = outputSheet.getRange(2, NON_RETAIL_START_COL, 1, width).getValues()[0];
-  var row3 = outputSheet.getRange(3, NON_RETAIL_START_COL, 1, width).getValues()[0];
+  // Row 1 = store headers, Row 2 = person names (after layout change)
+  var row2 = outputSheet.getRange(1, NON_RETAIL_START_COL, 1, width).getValues()[0];
+  var row3 = outputSheet.getRange(2, NON_RETAIL_START_COL, 1, width).getValues()[0];
 
   var stores = {};
   var currentStore = '';
@@ -850,7 +858,7 @@ function readNonRetailLayout_(outputSheet) {
       // Check if this is a 出勤 column (even offset within person pair)
       var row4val = '';
       if (col1 <= lastCol) {
-        row4val = String(outputSheet.getRange(4, col1).getValue()).trim();
+        row4val = String(outputSheet.getRange(3, col1).getValue()).trim();
       }
       if (row4val === '出勤' && col1 + 1 <= lastCol) {
         if (!stores[currentStore]) {
@@ -1283,11 +1291,11 @@ function updateShiftOutputLayout_(staff) {
   var oldTotalCols = oldLayout.totalCols;
   var newTotalCols = newLayout.totalCols;
 
-  // Clear old non-retail section (rows 2-4 headers + data area)
+  // Clear old non-retail section (rows 1-3 headers + data area)
   var clearWidth = Math.max(oldTotalCols, newTotalCols) - NON_RETAIL_START_COL + 2;
   if (clearWidth > 0) {
-    // Clear headers (rows 2-4)
-    var headerRange = outputSheet.getRange(2, NON_RETAIL_START_COL, 3, clearWidth);
+    // Clear headers (rows 1-3)
+    var headerRange = outputSheet.getRange(1, NON_RETAIL_START_COL, 3, clearWidth);
     headerRange.breakApart();
     headerRange.clearContent();
     headerRange.clearFormat();
@@ -1299,7 +1307,7 @@ function updateShiftOutputLayout_(staff) {
     dataRange.clearDataValidations();
   }
 
-  // Write new Row 2 (store name headers with merges)
+  // Write new Row 1 (store name headers with merges)
   newLayout.storeOrder.forEach(function(storeName) {
     var storeInfo = newLayout.stores[storeName];
     if (!storeInfo.cols.length) return;
@@ -1307,34 +1315,34 @@ function updateShiftOutputLayout_(staff) {
     var lastCol = storeInfo.cols[storeInfo.cols.length - 1].e;
     var span = lastCol - firstCol + 1;
 
-    outputSheet.getRange(2, firstCol).setValue(storeName);
+    outputSheet.getRange(1, firstCol).setValue(storeName);
     if (span > 1) {
-      outputSheet.getRange(2, firstCol, 1, span).merge();
+      outputSheet.getRange(1, firstCol, 1, span).merge();
     }
   });
 
   // Write メモ header
-  outputSheet.getRange(2, newLayout.memoCol).setValue('メモ');
+  outputSheet.getRange(1, newLayout.memoCol).setValue('メモ');
 
-  // Write new Row 3 (person names)
+  // Write new Row 2 (person names)
   for (var storeName in newLayout.stores) {
     var storeInfo = newLayout.stores[storeName];
     for (var i = 0; i < storeInfo.cols.length; i++) {
-      outputSheet.getRange(3, storeInfo.cols[i].s).setValue(storeInfo.names[i]);
+      outputSheet.getRange(2, storeInfo.cols[i].s).setValue(storeInfo.names[i]);
     }
   }
 
-  // Write new Row 4 (出勤/退勤 sub-headers)
+  // Write new Row 3 (出勤/退勤 sub-headers)
   for (var storeName in newLayout.stores) {
     var storeInfo = newLayout.stores[storeName];
     for (var i = 0; i < storeInfo.cols.length; i++) {
-      outputSheet.getRange(4, storeInfo.cols[i].s).setValue('出勤');
-      outputSheet.getRange(4, storeInfo.cols[i].e).setValue('退勤');
+      outputSheet.getRange(3, storeInfo.cols[i].s).setValue('出勤');
+      outputSheet.getRange(3, storeInfo.cols[i].e).setValue('退勤');
     }
   }
-  outputSheet.getRange(4, newLayout.memoCol).setValue('メモ');
+  outputSheet.getRange(3, newLayout.memoCol).setValue('メモ');
 
-  // Style Row 2: store headers
+  // Style Row 1: store headers
   var storeColors = { '工場': '#FFF2CC', 'EC': '#D9EAD3', '本部オフィス': '#D9D2E9' };
   newLayout.storeOrder.forEach(function(storeName) {
     var storeInfo = newLayout.stores[storeName];
@@ -1343,22 +1351,22 @@ function updateShiftOutputLayout_(staff) {
     var lastCol = storeInfo.cols[storeInfo.cols.length - 1].e;
     var span = lastCol - firstCol + 1;
     var color = storeColors[storeName] || '#E8EAED';
-    outputSheet.getRange(2, firstCol, 1, span)
+    outputSheet.getRange(1, firstCol, 1, span)
       .setBackground(color).setFontWeight('bold').setHorizontalAlignment('center');
   });
-  outputSheet.getRange(2, newLayout.memoCol)
+  outputSheet.getRange(1, newLayout.memoCol)
     .setBackground('#E8EAED').setFontWeight('bold').setHorizontalAlignment('center');
 
-  // Style Row 3: person names
+  // Style Row 2: person names
   newLayout.allPersonCols.forEach(function(pc) {
-    outputSheet.getRange(3, pc.s, 1, 2)
+    outputSheet.getRange(2, pc.s, 1, 2)
       .setFontWeight('bold').setHorizontalAlignment('center').setFontSize(9);
   });
 
-  // Style Row 4: sub-headers
-  var row4Width = newLayout.memoCol - NON_RETAIL_START_COL + 1;
-  if (row4Width > 0) {
-    outputSheet.getRange(4, NON_RETAIL_START_COL, 1, row4Width)
+  // Style Row 3: sub-headers
+  var row3Width = newLayout.memoCol - NON_RETAIL_START_COL + 1;
+  if (row3Width > 0) {
+    outputSheet.getRange(3, NON_RETAIL_START_COL, 1, row3Width)
       .setBackground('#E8EAED').setFontWeight('bold').setHorizontalAlignment('center').setFontSize(8);
   }
 
