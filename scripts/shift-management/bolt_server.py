@@ -89,16 +89,19 @@ def upsert_kintone_shift(staff_id: str, shift_date: str, shift_status: str,
         logger.error(f"kintone search failed: {e}")
         return False
 
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     record_fields = {
         "shift_type": {"value": shift_status},
         "input_status": {"value": "入力済"},
         "input_channel": {"value": "Slack"},
-        "submitted_at": {"value": datetime.datetime.now().isoformat()},
+        "submitted_at": {"value": now},
     }
     if start_time:
         record_fields["start_time"] = {"value": start_time}
-    if end_time:
-        record_fields["end_time"] = {"value": end_time}
+        record_fields["end_time"] = {"value": end_time or start_time}
+        record_fields["work_time_type"] = {"value": "時間指定"}
+    else:
+        record_fields["work_time_type"] = {"value": "フリー"}
 
     records = data.get("records", [])
 
@@ -120,6 +123,18 @@ def upsert_kintone_shift(staff_id: str, shift_date: str, shift_status: str,
         # Create new
         record_fields["staff_id"] = {"value": staff_id}
         record_fields["shift_date"] = {"value": shift_date}
+        # Compute period: 1-15日 → period=当月1-15, 16-末日 → period=当月16-末日
+        d = datetime.date.fromisoformat(shift_date)
+        if d.day <= 15:
+            p_start = d.replace(day=1).isoformat()
+            p_end = d.replace(day=15).isoformat()
+        else:
+            import calendar
+            p_start = d.replace(day=16).isoformat()
+            last_day = calendar.monthrange(d.year, d.month)[1]
+            p_end = d.replace(day=last_day).isoformat()
+        record_fields["target_period_start"] = {"value": p_start}
+        record_fields["target_period_end"] = {"value": p_end}
         payload = {
             "app": KINTONE_SHIFT_WISH_APP_ID,
             "record": record_fields,

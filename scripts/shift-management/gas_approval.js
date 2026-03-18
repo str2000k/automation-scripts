@@ -90,7 +90,180 @@ function onOpen() {
     .addSeparator()
     .addItem('⑤ 月データ読込 (年月セレクター)', 'loadMonthData')
     .addItem('⚙ トリガー設定 (初回のみ)', 'setupTrigger')
+    .addItem('⚙ 希望収集リマインド設定', 'setupDailyReminder')
     .addToUi();
+}
+
+// ==========================================================================
+// シフト希望収集 自動通知 (dailyShiftReminder - 毎日トリガーで実行)
+// ==========================================================================
+
+/**
+ * 毎日実行: 日付に応じてシフト希望収集の開始通知/リマインドを送信。
+ *
+ * スケジュール:
+ *   1日: 当月後半(16日〜末日)の希望収集開始通知, 締切10日
+ *   15日: 翌月前半(1日〜15日)の希望収集開始通知, 締切25日
+ *   5日,8日,10日: 10日締切のリマインド (5日前,2日前,当日)
+ *   20日,23日,25日: 25日締切のリマインド (5日前,2日前,当日)
+ *   11日以降(偶数日): 10日締切超過リマインド(1日おき)
+ *   26日以降(偶数日): 25日締切超過リマインド(1日おき)
+ */
+function dailyShiftReminder() {
+  var today = new Date();
+  var day = today.getDate();
+  var month = today.getMonth() + 1; // 1-indexed
+  var year = today.getFullYear();
+
+  // Determine which collection period to check
+  var periodInfo = null;
+
+  // --- 10日締切: 当月後半 ---
+  if (day === 1) {
+    // 収集開始通知
+    var lastDay = new Date(year, month, 0).getDate();
+    periodInfo = { type: 'start', periodStart: year + '-' + pad2(month) + '-16', periodEnd: year + '-' + pad2(month) + '-' + lastDay, deadline: month + '/10' };
+  } else if (day === 5 || day === 8 || day === 10) {
+    var lastDay = new Date(year, month, 0).getDate();
+    var daysLeft = 10 - day;
+    periodInfo = { type: 'remind', periodStart: year + '-' + pad2(month) + '-16', periodEnd: year + '-' + pad2(month) + '-' + lastDay, deadline: month + '/10', daysLeft: daysLeft };
+  } else if (day > 10 && day <= 14 && day % 2 === 0) {
+    var lastDay = new Date(year, month, 0).getDate();
+    periodInfo = { type: 'overdue', periodStart: year + '-' + pad2(month) + '-16', periodEnd: year + '-' + pad2(month) + '-' + lastDay, deadline: month + '/10' };
+  }
+
+  // --- 25日締切: 翌月前半 ---
+  if (day === 15) {
+    var nextMonth = month === 12 ? 1 : month + 1;
+    var nextYear = month === 12 ? year + 1 : year;
+    periodInfo = { type: 'start', periodStart: nextYear + '-' + pad2(nextMonth) + '-01', periodEnd: nextYear + '-' + pad2(nextMonth) + '-15', deadline: month + '/25' };
+  } else if (day === 20 || day === 23 || day === 25) {
+    var nextMonth = month === 12 ? 1 : month + 1;
+    var nextYear = month === 12 ? year + 1 : year;
+    var daysLeft = 25 - day;
+    periodInfo = { type: 'remind', periodStart: nextYear + '-' + pad2(nextMonth) + '-01', periodEnd: nextYear + '-' + pad2(nextMonth) + '-15', deadline: month + '/25', daysLeft: daysLeft };
+  } else if (day > 25 && day % 2 === 0) {
+    var nextMonth = month === 12 ? 1 : month + 1;
+    var nextYear = month === 12 ? year + 1 : year;
+    periodInfo = { type: 'overdue', periodStart: nextYear + '-' + pad2(nextMonth) + '-01', periodEnd: nextYear + '-' + pad2(nextMonth) + '-15', deadline: month + '/25' };
+  }
+
+  if (!periodInfo) return; // 通知不要の日
+
+  // Get all staff
+  var staff = readStaffMaster_();
+
+  if (periodInfo.type === 'start') {
+    // 全スタッフに開始通知
+    var text = '*シフト希望入力を開始してください*\n'
+      + '対象期間: ' + periodInfo.periodStart + ' 〜 ' + periodInfo.periodEnd + '\n'
+      + '締切: *' + periodInfo.deadline + '*\n'
+      + '希望シフトスタッフ → 出勤可能な日時を入力\n'
+      + '固定シフトスタッフ → 希望休がある場合は入力（なしでも「入力済」にしてください）';
+    slackPost_(text);
+    Logger.log('Shift collection start notification sent: ' + periodInfo.periodStart + ' ~ ' + periodInfo.periodEnd);
+    return;
+  }
+
+  // リマインド / 期限超過: 未入力者を検出
+  var unsubmitted = findUnsubmittedStaff_(staff, periodInfo.periodStart, periodInfo.periodEnd);
+
+  if (unsubmitted.length === 0) {
+    Logger.log('All staff submitted for ' + periodInfo.periodStart + ' ~ ' + periodInfo.periodEnd);
+    return;
+  }
+
+  // Build mention list
+  var mentions = unsubmitted.map(function(s) {
+    return s.slackId ? '<@' + s.slackId + '>' : s.name;
+  }).join(', ');
+
+  var text;
+  if (periodInfo.type === 'remind') {
+    if (periodInfo.daysLeft > 0) {
+      text = '*シフト希望 未入力のお知らせ*\n'
+        + '対象期間: ' + periodInfo.periodStart + ' 〜 ' + periodInfo.periodEnd + '\n'
+        + '締切: *' + periodInfo.deadline + '* (あと' + periodInfo.daysLeft + '日)\n'
+        + '未入力: ' + mentions;
+    } else {
+      text = '*本日シフト希望の締切です！*\n'
+        + '対象期間: ' + periodInfo.periodStart + ' 〜 ' + periodInfo.periodEnd + '\n'
+        + '未入力: ' + mentions + '\n'
+        + '至急入力をお願いします。';
+    }
+  } else if (periodInfo.type === 'overdue') {
+    text = '*⚠ シフト希望 提出期限超過*\n'
+      + '対象期間: ' + periodInfo.periodStart + ' 〜 ' + periodInfo.periodEnd + '\n'
+      + '締切 ' + periodInfo.deadline + ' を過ぎています。\n'
+      + '未入力: ' + mentions + '\n'
+      + '至急入力してください！';
+  }
+
+  if (text) {
+    slackPost_(text);
+    Logger.log('Shift reminder sent (' + periodInfo.type + '): ' + unsubmitted.length + ' unsubmitted');
+  }
+}
+
+function pad2(n) { return ('0' + n).slice(-2); }
+
+/**
+ * 指定期間の未入力スタッフを検出
+ */
+function findUnsubmittedStaff_(staff, periodStart, periodEnd) {
+  // Count expected days in period
+  var startDate = new Date(periodStart + 'T00:00:00');
+  var endDate = new Date(periodEnd + 'T00:00:00');
+  var expectedDays = Math.round((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
+
+  // Fetch kintone 211 records for this period
+  var query = 'shift_date >= "' + periodStart + '" and shift_date <= "' + periodEnd
+    + '" and input_status in ("入力済") order by staff_id asc';
+  var result = kintoneGet_(KINTONE_WISH_APP, query);
+  var records = result.records || [];
+
+  // Count records per staff
+  var submittedCount = {};
+  records.forEach(function(r) {
+    var sid = r.staff_id ? r.staff_id.value : '';
+    if (!submittedCount[sid]) submittedCount[sid] = 0;
+    submittedCount[sid]++;
+  });
+
+  // Find staff with 0 records (no submission at all)
+  var unsubmitted = [];
+  staff.forEach(function(s) {
+    var sid = s['staff_id'];
+    var count = submittedCount[sid] || 0;
+    if (count === 0) {
+      unsubmitted.push({
+        staffId: sid,
+        name: s['氏名'],
+        slackId: s['Slack ID'] || '',
+      });
+    }
+  });
+
+  return unsubmitted;
+}
+
+/**
+ * 希望収集リマインドのトリガーを設定（初回1回だけ実行）
+ */
+function setupDailyReminder() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'dailyShiftReminder') {
+      SpreadsheetApp.getUi().alert('dailyShiftReminder は既に設定済みです。');
+      return;
+    }
+  }
+  ScriptApp.newTrigger('dailyShiftReminder')
+    .timeBased()
+    .atHour(9)
+    .everyDays(1)
+    .create();
+  SpreadsheetApp.getUi().alert('希望収集リマインドを設定しました。\n毎朝9時に自動実行されます。');
 }
 
 /**
@@ -1102,14 +1275,13 @@ function syncStaffMaster() {
         staff_id: { value: s['staff_id'] },
         name: { value: s['氏名'] },
         employment_type: { value: s['雇用形態'] },
-        store: { value: s['対応店舗'] },
-        shift_type: { value: s['働き方'] },
         position: { value: s['役職'] },
-        max_hours_per_week: { value: s['最大労働時間/週'] || '40' },
-        active: { value: s['有効フラグ'] },
+        shift_type: { value: s['働き方'] },
         main_store: { value: s['メイン店舗'] || '' },
+        store: { value: s['対応店舗'] },
         slack_id: { value: s['Slack ID'] || '' },
         line_uid: { value: s['LINE UID'] || '' },
+        email: { value: s['メールアドレス'] || '' },
         personal_rule: { value: s['個人ルール'] || '' },
       };
       var rid = existMap[s['staff_id']];
@@ -1120,17 +1292,17 @@ function syncStaffMaster() {
       }
     });
 
-    // --- 削除同期: スプレッドシートに存在しないstaff_idを無効化 ---
+    // --- 削除同期: スプレッドシートに存在しない(有効でない)staff_idをkintoneから削除 ---
     var sheetSids = {};
     staff.forEach(function(s) { sheetSids[s['staff_id']] = true; });
-    var toDeactivate = [];
+    var toDeleteIds = [];
     for (var sid in existMap) {
       if (!sheetSids[sid]) {
-        toDeactivate.push({ id: existMap[sid], record: { active: { value: '無効' } } });
+        toDeleteIds.push(parseInt(existMap[sid]));
       }
     }
 
-    var addCount = 0, updateCount = 0, deactivateCount = 0;
+    var addCount = 0, updateCount = 0, deleteCount = 0;
     for (var i = 0; i < toAdd.length; i += 100) {
       kintonePost_(KINTONE_STAFF_APP, toAdd.slice(i, i + 100));
       addCount += Math.min(100, toAdd.length - i);
@@ -1139,9 +1311,19 @@ function syncStaffMaster() {
       kintonePut_(KINTONE_STAFF_APP, toUpdate.slice(i, i + 100));
       updateCount += Math.min(100, toUpdate.length - i);
     }
-    for (var i = 0; i < toDeactivate.length; i += 100) {
-      kintonePut_(KINTONE_STAFF_APP, toDeactivate.slice(i, i + 100));
-      deactivateCount += Math.min(100, toDeactivate.length - i);
+    if (toDeleteIds.length > 0) {
+      for (var i = 0; i < toDeleteIds.length; i += 100) {
+        var batch = toDeleteIds.slice(i, i + 100);
+        var domain = getProp_('KINTONE_DOMAIN');
+        UrlFetchApp.fetch('https://' + domain + '/k/v1/records.json', {
+          method: 'delete',
+          contentType: 'application/json',
+          headers: { 'X-Cybozu-Authorization': kintoneAuth_() },
+          payload: JSON.stringify({ app: KINTONE_STAFF_APP, ids: batch }),
+          muteHttpExceptions: true,
+        });
+        deleteCount += batch.length;
+      }
     }
 
     // --- シフト出力の非営業セクション + 名前ドロップダウン更新 ---
@@ -1151,7 +1333,7 @@ function syncStaffMaster() {
       'スタッフマスタ同期完了\n\n' +
       '希望収集データ: ' + wishStaffCount + '名のヘッダーを更新\n' +
       'シフト出力: ' + outputResult.message + '\n' +
-      'kintone 213: 新規 ' + addCount + '件 / 更新 ' + updateCount + '件 / 無効化 ' + deactivateCount + '件'
+      'kintone 213: 新規 ' + addCount + '件 / 更新 ' + updateCount + '件 / 削除 ' + deleteCount + '件'
     );
   } catch (e) {
     slackError_('syncStaffMaster', e.message);
