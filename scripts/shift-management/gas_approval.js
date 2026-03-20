@@ -11,11 +11,10 @@
  *   ⑤ 月データ読込: 年月セレクターの値でkintoneからデータを両シートに表示
  *
  * シフト出力 横型レイアウト (動的列数):
- *   Row 1: 年月セレクター (D1=年[D:E merged], F1="年", G1=月[G:H merged], I1="月")
- *   Row 2: 店舗名ヘッダー (藤沢/伊勢佐木町/新宿/工場/EC/本部オフィス/メモ)
- *   Row 3: シフト種別 (営業: 早番/遅番/※予備) / 担当者名 (非営業)
- *   Row 4: カラムヘッダー (確定/変更/日付/出勤/退勤...)
- *   Row 5+: データ (2行/日 × 31日 = 62行)
+ *   Row 1: A1=年セレクター + 店舗名ヘッダー (藤沢/伊勢佐木町/新宿/工場/EC/本部オフィス/メモ)
+ *   Row 2: A2=月セレクター + シフト種別 (営業: 早番/遅番/※予備) / 担当者名 (非営業)
+ *   Row 3: カラムヘッダー (確定/変更/日付/出勤/退勤...)
+ *   Row 4+: データ (2行/日 × 31日 = 62行)
  *     - 日付行(名前行): 営業=名前プルダウン, 非営業=出勤/公休プルダウン
  *     - 曜日行(時間行): 出勤/退勤の時間プルダウン (6:00-25:00)
  *
@@ -87,10 +86,6 @@ function onOpen() {
     .addItem('② 希望シフト取得', 'fetchWishData')
     .addItem('③ AIシフト生成', 'generateShift')
     .addItem('④ 確定シフト反映', 'syncConfirmedShift')
-    .addSeparator()
-    .addItem('⑤ 月データ読込 (年月セレクター)', 'loadMonthData')
-    .addItem('⚙ トリガー設定 (初回のみ)', 'setupTrigger')
-    .addItem('⚙ 希望収集リマインド設定', 'setupDailyReminder')
     .addToUi();
 }
 
@@ -216,11 +211,10 @@ function findUnsubmittedStaff_(staff, periodStart, periodEnd) {
   var endDate = new Date(periodEnd + 'T00:00:00');
   var expectedDays = Math.round((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
 
-  // Fetch kintone 211 records for this period
-  var query = 'shift_date >= "' + periodStart + '" and shift_date <= "' + periodEnd
-    + '" and input_status in ("入力済") order by staff_id asc';
-  var result = kintoneGet_(KINTONE_WISH_APP, query);
-  var records = result.records || [];
+  // Fetch kintone 211 records for this period (paginated)
+  var records = kintoneGetAll_(KINTONE_WISH_APP,
+    'shift_date >= "' + periodStart + '" and shift_date <= "' + periodEnd
+    + '" and input_status in ("入力済") order by staff_id asc');
 
   // Count records per staff
   var submittedCount = {};
@@ -416,9 +410,8 @@ function loadShiftOutputData_(year, month) {
   var nrLayout = readNonRetailLayout_(outputSheet);
   var OUTPUT_TOTAL_COLS = nrLayout.totalCols;
 
-  // Clear entire data area
+  // Clear data values only (preserve formatting)
   outputSheet.getRange(OUTPUT_DSTART, 1, OUTPUT_DAYS * 2, OUTPUT_TOTAL_COLS).clearContent();
-  outputSheet.getRange(OUTPUT_DSTART, 1, OUTPUT_DAYS * 2, OUTPUT_TOTAL_COLS).setBackground('#ffffff').setFontColor('#000000');
 
   // Build 2D grids: values, backgrounds, font colors
   var grid = [];       // 2D array of cell values
@@ -510,6 +503,12 @@ function loadShiftOutputData_(year, month) {
     var nameIdx = (day - 1) * 2;
     var timeIdx = nameIdx + 1;
     var usedSlots = {};
+
+    // kintoneにデータがある日は確定チェックをONにする
+    if (entries.length > 0) {
+      setCell(nameIdx, 1, true);   // 確定=ON
+    }
+    setCell(nameIdx, 2, false);    // 変更=OFF (常にリセット)
 
     // Collect working staff
     var workingStaff = {};
@@ -623,27 +622,11 @@ function loadShiftOutputData_(year, month) {
     }
   }
 
-  // Build font weight grid: bold for non-time text, normal for times
-  var fwGrid = [];
-  for (var r = 0; r < totalRows; r++) {
-    var fwRow = [];
-    for (var c = 0; c < OUTPUT_TOTAL_COLS; c++) {
-      var val = String(grid[r][c]);
-      if (val && val.indexOf(':') < 0) {
-        fwRow.push('bold');
-      } else {
-        fwRow.push('normal');
-      }
-    }
-    fwGrid.push(fwRow);
-  }
-
-  // Apply everything in bulk calls
+  // Apply values and backgrounds only (preserve manual formatting)
   outputSheet.getRange(OUTPUT_DSTART, 1, totalRows, OUTPUT_TOTAL_COLS).setValues(grid);
   outputSheet.getRange(OUTPUT_DSTART, 1, totalRows, OUTPUT_TOTAL_COLS).setBackgrounds(bgGrid);
-  outputSheet.getRange(OUTPUT_DSTART, 1, totalRows, OUTPUT_TOTAL_COLS).setFontWeights(fwGrid);
 
-  // Merge name-row cells (出勤+退勤) for all non-retail person columns
+  // Re-merge non-retail name-row cells (setValues breaks merges)
   for (var storeName in nrLayout.stores) {
     var storeInfo = nrLayout.stores[storeName];
     for (var pi = 0; pi < storeInfo.cols.length; pi++) {
@@ -714,37 +697,6 @@ function loadShiftOutputData_(year, month) {
       outputSheet.getRange(timeRowNum, pc.e).setDataValidation(timeRule);
     }
   }
-
-  // Borders
-  var dataEndRow = OUTPUT_DSTART + totalRows;
-  var sectionCols = [3, 9, 15, 21];  // After C, 藤沢, 伊勢佐木, 新宿
-  for (var si = 0; si < nrLayout.storeOrder.length; si++) {
-    var sInfo = nrLayout.stores[nrLayout.storeOrder[si]];
-    if (sInfo && sInfo.cols.length > 0) {
-      sectionCols.push(sInfo.cols[sInfo.cols.length - 1].e);
-    }
-  }
-  try {
-    var batchReqs = [{updateBorders: {
-      range: {sheetId: outputSheet.getSheetId(), startRowIndex: 1, endRowIndex: dataEndRow, startColumnIndex: 0, endColumnIndex: OUTPUT_TOTAL_COLS},
-      innerHorizontal: {style: 'SOLID', width: 1, color: {red: 0.85, green: 0.85, blue: 0.85}},
-      innerVertical: {style: 'SOLID', width: 1, color: {red: 0.85, green: 0.85, blue: 0.85}},
-    }}, {updateBorders: {
-      range: {sheetId: outputSheet.getSheetId(), startRowIndex: 3, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: OUTPUT_TOTAL_COLS},
-      bottom: {style: 'SOLID_MEDIUM', width: 2, color: {red: 0.3, green: 0.3, blue: 0.3}},
-    }}];
-    for (var bi = 0; bi < sectionCols.length; bi++) {
-      batchReqs.push({updateBorders: {
-        range: {sheetId: outputSheet.getSheetId(), startRowIndex: 1, endRowIndex: dataEndRow, startColumnIndex: sectionCols[bi], endColumnIndex: sectionCols[bi] + 1},
-        left: {style: 'SOLID', width: 1, color: {red: 0.4, green: 0.4, blue: 0.4}},
-      }});
-    }
-    UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + SS_ID + ':batchUpdate', {
-      method: 'post', contentType: 'application/json',
-      headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() },
-      payload: JSON.stringify({ requests: batchReqs }), muteHttpExceptions: true,
-    });
-  } catch (e) { Logger.log('Border error: ' + e.message); }
 
   return records.length + '件読込 (' + written + '配置)';
 }
@@ -827,12 +779,10 @@ function loadWishSheetData_(year, month) {
     }
   }
 
-  // Fetch kintone 211
-  var query = 'shift_date >= "' + firstDate + '" and shift_date <= "' + lastDate
-    + '" and input_status in ("入力済")'
-    + ' order by shift_date asc limit 500';
-  var result = kintoneGet_(KINTONE_WISH_APP, query);
-  var records = result.records || [];
+  // Fetch kintone 211 (paginated)
+  var records = kintoneGetAll_(KINTONE_WISH_APP,
+    'shift_date >= "' + firstDate + '" and shift_date <= "' + lastDate
+    + '" and input_status in ("入力済") order by shift_date asc');
   if (!records.length) {
     wishSheet.getRange(4, 1, lastDay, totalCols).setValues(grid);
     wishSheet.getRange(4, 1, lastDay, totalCols).setBackgrounds(bgGrid);
@@ -903,10 +853,9 @@ function loadWishSheetData_(year, month) {
     }
   }
 
-  // Apply all at once
+  // Apply values and backgrounds (preserve manual formatting)
   wishSheet.getRange(4, 1, lastDay, totalCols).setValues(grid);
   wishSheet.getRange(4, 1, lastDay, totalCols).setBackgrounds(bgGrid);
-  wishSheet.getRange(4, 1, lastDay, totalCols).setFontColor('#000000');
 
   // Re-apply dropdowns for wish staff (出勤/退勤) and fixed staff (希望休)
   var timeOptions = ['×','9:00','9:30','10:00','10:30','11:00','11:30','12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30','16:00','16:30','17:00','17:30','18:00','18:30','19:00','19:30','20:00','20:30','21:00','21:30','22:00','22:30','23:00','23:30','0:00','0:30'];
@@ -995,7 +944,7 @@ function getSelectedYearMonth_() {
 function readNonRetailLayout_(outputSheet) {
   var lastCol = Math.max(outputSheet.getLastColumn(), NON_RETAIL_START_COL);
   if (lastCol < NON_RETAIL_START_COL) {
-    return { stores: {}, memoCol: NON_RETAIL_START_COL, totalCols: NON_RETAIL_START_COL, allPersonCols: [] };
+    return { stores: {}, storeOrder: [], memoCol: NON_RETAIL_START_COL, totalCols: NON_RETAIL_START_COL, allPersonCols: [] };
   }
 
   var width = lastCol - NON_RETAIL_START_COL + 1;
@@ -1004,6 +953,7 @@ function readNonRetailLayout_(outputSheet) {
   var row3 = outputSheet.getRange(2, NON_RETAIL_START_COL, 1, width).getValues()[0];
 
   var stores = {};
+  var storeOrder = [];
   var currentStore = '';
   var memoCol = lastCol;
   var allPersonCols = [];
@@ -1036,6 +986,7 @@ function readNonRetailLayout_(outputSheet) {
       if (row4val === '出勤' && col1 + 1 <= lastCol) {
         if (!stores[currentStore]) {
           stores[currentStore] = { names: [], cols: [] };
+          storeOrder.push(currentStore);
         }
         var pc = { s: col1, e: col1 + 1 };
         stores[currentStore].names.push(nameVal);
@@ -1048,6 +999,7 @@ function readNonRetailLayout_(outputSheet) {
 
   return {
     stores: stores,
+    storeOrder: storeOrder,
     memoCol: memoCol,
     totalCols: memoCol,
     allPersonCols: allPersonCols,
@@ -1162,6 +1114,36 @@ function kintonePut_(appId, records) {
     muteHttpExceptions: true,
   });
   return JSON.parse(resp.getContentText());
+}
+
+function kintoneDelete_(appId, ids) {
+  var domain = getProp_('KINTONE_DOMAIN');
+  var resp = UrlFetchApp.fetch('https://' + domain + '/k/v1/records.json', {
+    method: 'delete',
+    contentType: 'application/json',
+    headers: { 'X-Cybozu-Authorization': kintoneAuth_() },
+    payload: JSON.stringify({ app: appId, ids: ids }),
+    muteHttpExceptions: true,
+  });
+  return JSON.parse(resp.getContentText());
+}
+
+/**
+ * kintoneから全レコード取得 (ページネーション対応)
+ */
+function kintoneGetAll_(appId, query) {
+  var all = [];
+  var offset = 0;
+  var limit = 500;
+  while (true) {
+    var q = query + ' limit ' + limit + ' offset ' + offset;
+    var result = kintoneGet_(appId, q);
+    var records = result.records || [];
+    all = all.concat(records);
+    if (records.length < limit) break;
+    offset += limit;
+  }
+  return all;
 }
 
 // ==========================================================================
@@ -1329,10 +1311,17 @@ function syncStaffMaster() {
     // --- シフト出力の非営業セクション + 名前ドロップダウン更新 ---
     var outputResult = updateShiftOutputLayout_(staff);
 
+    // レイアウト更新後、現在の年月データを再読込（非営業セクションのデータ復元）
+    var ym = getSelectedYearMonth_();
+    var reloadMsg = '';
+    if (ym) {
+      reloadMsg = loadShiftOutputData_(ym.year, ym.month);
+    }
+
     ui.alert(
       'スタッフマスタ同期完了\n\n' +
       '希望収集データ: ' + wishStaffCount + '名のヘッダーを更新\n' +
-      'シフト出力: ' + outputResult.message + '\n' +
+      'シフト出力: ' + outputResult.message + (reloadMsg ? ' → データ再読込: ' + reloadMsg : '') + '\n' +
       'kintone 213: 新規 ' + addCount + '件 / 更新 ' + updateCount + '件 / 削除 ' + deleteCount + '件'
     );
   } catch (e) {
@@ -1476,16 +1465,14 @@ function updateShiftOutputLayout_(staff) {
   // Clear old non-retail section (rows 1-3 headers + data area)
   var clearWidth = Math.max(oldTotalCols, newTotalCols) - NON_RETAIL_START_COL + 2;
   if (clearWidth > 0) {
-    // Clear headers (rows 1-3)
+    // Clear headers (rows 1-3): unmerge + clear values only
     var headerRange = outputSheet.getRange(1, NON_RETAIL_START_COL, 3, clearWidth);
     headerRange.breakApart();
     headerRange.clearContent();
-    headerRange.clearFormat();
 
-    // Clear data area
+    // Clear data area (values + validations only, preserve formatting)
     var dataRange = outputSheet.getRange(OUTPUT_DSTART, NON_RETAIL_START_COL, OUTPUT_DAYS * 2, clearWidth);
     dataRange.clearContent();
-    dataRange.clearFormat();
     dataRange.clearDataValidations();
   }
 
@@ -1506,11 +1493,12 @@ function updateShiftOutputLayout_(staff) {
   // Write メモ header
   outputSheet.getRange(1, newLayout.memoCol).setValue('メモ');
 
-  // Write new Row 2 (person names)
+  // Write new Row 2 (person names with merge)
   for (var storeName in newLayout.stores) {
     var storeInfo = newLayout.stores[storeName];
     for (var i = 0; i < storeInfo.cols.length; i++) {
       outputSheet.getRange(2, storeInfo.cols[i].s).setValue(storeInfo.names[i]);
+      outputSheet.getRange(2, storeInfo.cols[i].s, 1, 2).merge();
     }
   }
 
@@ -1524,33 +1512,8 @@ function updateShiftOutputLayout_(staff) {
   }
   outputSheet.getRange(3, newLayout.memoCol).setValue('メモ');
 
-  // Style Row 1: store headers
-  var storeColors = { '工場': '#FFF2CC', 'EC': '#D9EAD3', '本部オフィス': '#D9D2E9' };
-  newLayout.storeOrder.forEach(function(storeName) {
-    var storeInfo = newLayout.stores[storeName];
-    if (!storeInfo.cols.length) return;
-    var firstCol = storeInfo.cols[0].s;
-    var lastCol = storeInfo.cols[storeInfo.cols.length - 1].e;
-    var span = lastCol - firstCol + 1;
-    var color = storeColors[storeName] || '#E8EAED';
-    outputSheet.getRange(1, firstCol, 1, span)
-      .setBackground(color).setFontWeight('bold').setHorizontalAlignment('center');
-  });
-  outputSheet.getRange(1, newLayout.memoCol)
-    .setBackground('#E8EAED').setFontWeight('bold').setHorizontalAlignment('center');
-
-  // Style Row 2: person names
-  newLayout.allPersonCols.forEach(function(pc) {
-    outputSheet.getRange(2, pc.s, 1, 2)
-      .setFontWeight('bold').setHorizontalAlignment('center').setFontSize(9);
-  });
-
-  // Style Row 3: sub-headers
-  var row3Width = newLayout.memoCol - NON_RETAIL_START_COL + 1;
-  if (row3Width > 0) {
-    outputSheet.getRange(3, NON_RETAIL_START_COL, 1, row3Width)
-      .setBackground('#E8EAED').setFontWeight('bold').setHorizontalAlignment('center').setFontSize(8);
-  }
+  // NOTE: ヘッダーの色・フォント・枠線等の見た目は手動設定を維持。
+  // ここでは値とセル結合のみ設定する。
 
   // --- Retail name dropdowns ---
   var activeNames = staff.map(function(s) { return s['氏名']; });
@@ -1600,11 +1563,11 @@ function fetchWishData() {
     var lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
     var lastDate = year + '-' + m + '-' + ('0' + lastDay).slice(-2);
 
-    // Sync wish sheet year/month (D1/G1)
+    // Sync wish sheet year/month (D1=年, G1=月)
     var wishSheet = sheet_(SN_WISH);
     if (wishSheet) {
-      wishSheet.getRange(1, YEAR_COL).setValue(parseInt(year));
-      wishSheet.getRange(1, MONTH_COL).setValue(parseInt(month));
+      wishSheet.getRange(1, 4).setValue(parseInt(year));   // D1
+      wishSheet.getRange(1, 7).setValue(parseInt(month));  // G1
     }
 
     var msg = loadWishSheetData_(year, month);
@@ -1627,56 +1590,370 @@ function fetchWishData() {
 function generateShift() {
   ensureTrigger_();
   var ui = SpreadsheetApp.getUi();
-  var confirm = ui.alert(
-    'AIシフト生成',
-    'Claude APIを使ってシフトを自動生成しますか？\n処理に1-2分かかります。',
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (confirm !== ui.Button.OK) return;
 
   try {
     var ym = getSelectedYearMonth_();
-    if (!ym) { ui.alert('年月セレクター(D1/G1)を設定してください'); return; }
-
+    if (!ym) { ui.alert('年月セレクター(A1/A2)を設定してください'); return; }
     var year = ym.year;
     var month = ym.month;
     var m = ('0' + month).slice(-2);
-    var firstDate = year + '-' + m + '-01';
     var lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
-    var lastDate = year + '-' + m + '-' + ('0' + lastDay).slice(-2);
 
-    ui.alert('生成を開始します。完了するまでお待ちください...\n(この画面は閉じてOK)');
+    // 期間選択ダイアログ (HTML)
+    var html = HtmlService.createHtmlOutput(
+      '<style>'
+      + 'body { font-family: sans-serif; padding: 16px; }'
+      + 'label { display: block; margin: 8px 0 4px; font-weight: bold; }'
+      + 'select { font-size: 14px; padding: 4px 8px; }'
+      + '.btn { margin-top: 16px; padding: 8px 24px; font-size: 14px; cursor: pointer; }'
+      + '.btn-ok { background: #4285f4; color: white; border: none; border-radius: 4px; }'
+      + '.btn-cancel { background: #eee; border: 1px solid #ccc; border-radius: 4px; margin-left: 8px; }'
+      + '</style>'
+      + '<p>' + year + '年' + month + '月のシフト生成期間を選択してください</p>'
+      + '<label>開始日</label>'
+      + '<select id="startDay">'
+      + buildDayOptions_(1, lastDay)
+      + '</select>'
+      + '<label>終了日</label>'
+      + '<select id="endDay">'
+      + buildDayOptions_(lastDay, lastDay)
+      + '</select>'
+      + '<div style="margin-top:16px">'
+      + '<button class="btn btn-ok" onclick="submit()">生成開始</button>'
+      + '<button class="btn btn-cancel" onclick="google.script.host.close()">キャンセル</button>'
+      + '</div>'
+      + '<script>'
+      + 'function submit(){'
+      + '  var s = document.getElementById("startDay").value;'
+      + '  var e = document.getElementById("endDay").value;'
+      + '  if (parseInt(s) > parseInt(e)) { alert("開始日は終了日以前にしてください"); return; }'
+      + '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); })'
+      + '    .withFailureHandler(function(err){ alert("エラー: " + err.message); google.script.host.close(); })'
+      + '    .generateShiftForPeriod(s, e);'
+      + '}'
+      + '</script>'
+    ).setWidth(320).setHeight(260);
 
-    var staff = readStaffMaster_();
-    var stores = readStoreMaster_();
-    var rules = readRulesMaster_();
-    if (!staff.length) throw new Error('スタッフマスタが空です');
-
-    var wishes = readWishesFromSheet_(staff, year);
-    var dates = generateDates_(firstDate, lastDate);
-
-    var prompt = buildClaudePrompt_(staff, stores, rules, wishes, dates);
-    var response = callClaudeApi_(prompt);
-    var result = parseClaudeResponse_(response);
-
-    writeShiftOutput_(result, staff, stores, dates);
-
-    slackPost_(
-      '*シフト自動生成完了*\n' +
-      '対象期間: ' + firstDate + ' ~ ' + lastDate + '\n' +
-      'スタッフ数: ' + staff.length + '名\n' +
-      'スプレッドシートの「シフト出力」シートを確認してください。'
-    );
-
-    ui.alert(
-      'AIシフト生成完了\n\n' +
-      '対象期間: ' + firstDate + ' ~ ' + lastDate + '\n' +
-      'シフト出力シートを確認してください。'
-    );
+    ui.showModalDialog(html, '③ AIシフト生成 - 期間選択');
   } catch (e) {
     slackError_('generateShift', e.message);
-    ui.alert('シフト生成エラー: ' + e.message);
+    ui.alert('エラー: ' + e.message);
   }
+}
+
+function buildDayOptions_(defaultDay, lastDay) {
+  var opts = '';
+  for (var d = 1; d <= lastDay; d++) {
+    opts += '<option value="' + d + '"' + (d === defaultDay ? ' selected' : '') + '>' + d + '日</option>';
+  }
+  return opts;
+}
+
+/**
+ * ダイアログから呼ばれる: 指定期間のシフトをAI生成 (バリデーション+再生成ループ付き)
+ */
+function generateShiftForPeriod(startDay, endDay) {
+  var MAX_RETRIES = 3;
+  var ym = getSelectedYearMonth_();
+  var year = ym.year;
+  var month = ym.month;
+  var m = ('0' + month).slice(-2);
+  var firstDate = year + '-' + m + '-' + ('0' + parseInt(startDay)).slice(-2);
+  var lastDate = year + '-' + m + '-' + ('0' + parseInt(endDay)).slice(-2);
+
+  var staff = readStaffMaster_();
+  var stores = readStoreMaster_();
+  var rules = readRulesMaster_();
+  if (!staff.length) throw new Error('スタッフマスタが空です');
+
+  var wishes = readWishesFromSheet_(staff, year);
+  var dates = generateDates_(firstDate, lastDate);
+  var prompt = buildClaudePrompt_(staff, stores, rules, wishes, dates);
+
+  var result = null;
+  var lastErrors = [];
+
+  for (var attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    var callPrompt = prompt;
+    if (attempt > 1 && lastErrors.length > 0) {
+      callPrompt += '\n\n## 前回の生成結果に以下の問題がありました。修正してください:\n'
+        + lastErrors.map(function(e) { return '- ' + e; }).join('\n');
+    }
+
+    var response = callClaudeApi_(callPrompt);
+    result = parseClaudeResponse_(response);
+
+    var errors = validateShiftResult_(result, staff, stores, wishes, dates);
+    if (errors.length === 0) {
+      Logger.log('Shift generation passed validation on attempt ' + attempt);
+      break;
+    }
+
+    Logger.log('Attempt ' + attempt + ' failed validation: ' + errors.length + ' errors');
+    lastErrors = errors;
+
+    if (attempt === MAX_RETRIES) {
+      Logger.log('Max retries reached. Using last result with ' + errors.length + ' remaining issues.');
+    }
+  }
+
+  writeShiftOutput_(result, staff, stores, dates);
+
+  // AI出力を一時保存 (④実行時に人間の修正と比較するため)
+  saveAiOutput_(result, dates);
+
+  var statusMsg = lastErrors.length > 0
+    ? ' (注意: ' + lastErrors.length + '件の問題が残っています。手動確認してください)'
+    : '';
+
+  slackPost_(
+    '*シフト自動生成完了*\n' +
+    '対象期間: ' + firstDate + ' ~ ' + lastDate + '\n' +
+    'スタッフ数: ' + staff.length + '名' + statusMsg + '\n' +
+    'スプレッドシートの「シフト出力」シートを確認してください。'
+  );
+}
+
+/**
+ * 生成結果のバリデーション
+ * @return {string[]} エラーメッセージの配列 (空=問題なし)
+ */
+function validateShiftResult_(result, staff, stores, wishes, dates) {
+  var errors = [];
+  var schedule = result.schedule || [];
+
+  // スタッフ名→情報のマップ
+  var staffMap = {};
+  staff.forEach(function(s) { staffMap[s['氏名']] = s; });
+
+  // staff_id→名前のマップ
+  var sidToName = {};
+  staff.forEach(function(s) { sidToName[s['staff_id']] = s['氏名']; });
+
+  var retailStoreNames = Object.keys(RETAIL_COLS);
+
+  // 日付→スケジュールのマップ
+  var dayMap = {};
+  schedule.forEach(function(d) { dayMap[d.date] = d; });
+
+  // 週ごとの労働時間集計用
+  var weeklyHours = {}; // { staffName: { weekKey: hours } }
+
+  // --- Check 1: 全日分のデータがあるか ---
+  dates.forEach(function(dateStr) {
+    if (!dayMap[dateStr]) {
+      errors.push(dateStr + 'のスケジュールが欠落しています');
+    }
+  });
+
+  // --- Check 2-5: 各日のチェック ---
+  dates.forEach(function(dateStr) {
+    var day = dayMap[dateStr];
+    if (!day) return;
+    var storeAssigns = day.stores || {};
+    var times = day.times || {};
+
+    // Check 2: 営業店舗に早番/遅番が配置されているか
+    retailStoreNames.forEach(function(storeName) {
+      var assign = storeAssigns[storeName];
+      if (!assign) {
+        errors.push(dateStr + ': ' + storeName + 'の配置がありません');
+        return;
+      }
+      if (!assign['早番']) errors.push(dateStr + ': ' + storeName + 'の早番が未配置');
+      if (!assign['遅番']) errors.push(dateStr + ': ' + storeName + 'の遅番が未配置');
+    });
+
+    // Check 3: 希望休が尊重されているか
+    var allAssigned = {};
+    for (var sn in storeAssigns) {
+      var assign = storeAssigns[sn];
+      if (Array.isArray(assign)) {
+        assign.forEach(function(name) { allAssigned[name] = sn; });
+      } else if (typeof assign === 'object') {
+        for (var key in assign) {
+          if (assign[key]) allAssigned[assign[key]] = sn;
+        }
+      }
+    }
+
+    staff.forEach(function(s) {
+      var sid = s['staff_id'];
+      var name = s['氏名'];
+      var sw = wishes[sid];
+      if (!sw || !sw[dateStr]) return;
+      if (sw[dateStr].shift_type === '希望休' && allAssigned[name]) {
+        errors.push(dateStr + ': ' + name + 'は希望休なのに' + allAssigned[name] + 'に配置されています');
+      }
+    });
+
+    // Check 4: 対応店舗外への配置
+    for (var name in allAssigned) {
+      var info = staffMap[name];
+      if (!info) {
+        errors.push(dateStr + ': 不明なスタッフ名 "' + name + '"');
+        continue;
+      }
+      var assignedStore = allAssigned[name];
+      var allowedStores = (info['対応店舗'] || '').split(', ').filter(function(s) { return s; });
+      if (allowedStores.length > 0 && allowedStores.indexOf(assignedStore) < 0) {
+        errors.push(dateStr + ': ' + name + 'は' + assignedStore + 'に対応していません (対応: ' + allowedStores.join(',') + ')');
+      }
+    }
+
+    // Check 5: 労働時間集計
+    for (var name in times) {
+      var t = times[name];
+      if (!t || t.indexOf('-') < 0) continue;
+      var parts = t.split('-');
+      var startH = parseFloat(parts[0].replace(':', '.'));
+      var endH = parseFloat(parts[1].replace(':', '.'));
+      // 分を正しく計算
+      var startParts = parts[0].split(':');
+      var endParts = parts[1].split(':');
+      var startMin = parseInt(startParts[0]) * 60 + parseInt(startParts[1] || 0);
+      var endMin = parseInt(endParts[0]) * 60 + parseInt(endParts[1] || 0);
+      if (endMin <= startMin) endMin += 24 * 60; // 日をまたぐ
+      var hours = (endMin - startMin) / 60;
+
+      // 週の計算 (ISO week)
+      var d = new Date(dateStr + 'T00:00:00');
+      var weekStart = new Date(d);
+      weekStart.setDate(d.getDate() - d.getDay()); // 日曜始まり
+      var weekKey = Utilities.formatDate(weekStart, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+      if (!weeklyHours[name]) weeklyHours[name] = {};
+      if (!weeklyHours[name][weekKey]) weeklyHours[name][weekKey] = 0;
+      weeklyHours[name][weekKey] += hours;
+    }
+  });
+
+  // Check 5 continued: 週最大労働時間 + 残業チェック
+  var monthlyOvertime = {}; // { name: total overtime hours }
+
+  for (var name in weeklyHours) {
+    var info = staffMap[name];
+    if (!info) continue;
+    var maxHours = parseInt(info['最大労働時間/週'] || '40') || 40;
+    var weeks = weeklyHours[name];
+    for (var weekKey in weeks) {
+      if (weeks[weekKey] > maxHours) {
+        errors.push(name + ': 週' + weekKey + '〜の労働時間が' + Math.round(weeks[weekKey] * 10) / 10 + 'h (上限' + maxHours + 'h)');
+      }
+      // 週40時間超過分を残業として集計
+      var overtime = Math.max(0, weeks[weekKey] - 40);
+      if (!monthlyOvertime[name]) monthlyOvertime[name] = 0;
+      monthlyOvertime[name] += overtime;
+    }
+  }
+
+  // 月45時間超の残業チェック (36協定上限)
+  for (var name in monthlyOvertime) {
+    if (monthlyOvertime[name] > 45) {
+      errors.push(name + ': 月の時間外労働が' + Math.round(monthlyOvertime[name] * 10) / 10 + 'h (36協定上限45h超過)');
+    }
+  }
+
+  // 1日8時間超の日が多すぎる場合の警告 (特定スタッフへの偏り)
+  var dailyOvertimeCount = {}; // { name: 8h超の日数 }
+  dates.forEach(function(dateStr) {
+    var day = dayMap[dateStr];
+    if (!day) return;
+    var times = day.times || {};
+    for (var name in times) {
+      var t = times[name];
+      if (!t || t.indexOf('-') < 0) continue;
+      var parts = t.split('-');
+      var sp = parts[0].split(':'), ep = parts[1].split(':');
+      var sm = parseInt(sp[0]) * 60 + parseInt(sp[1] || 0);
+      var em = parseInt(ep[0]) * 60 + parseInt(ep[1] || 0);
+      if (em <= sm) em += 24 * 60;
+      var hours = (em - sm) / 60;
+      if (hours > 8) {
+        if (!dailyOvertimeCount[name]) dailyOvertimeCount[name] = 0;
+        dailyOvertimeCount[name]++;
+      }
+    }
+  });
+  // 期間の半分以上の日で8h超なら警告
+  var halfDays = Math.ceil(dates.length / 2);
+  for (var name in dailyOvertimeCount) {
+    if (dailyOvertimeCount[name] > halfDays) {
+      errors.push(name + ': ' + dates.length + '日中' + dailyOvertimeCount[name] + '日で8時間超勤務（残業の偏り）');
+    }
+  }
+
+  // Check 6: 勤務間インターバル (11時間)
+  for (var di = 0; di < dates.length - 1; di++) {
+    var today = dayMap[dates[di]];
+    var tomorrow = dayMap[dates[di + 1]];
+    if (!today || !tomorrow) continue;
+    var todayTimes = today.times || {};
+    var tomorrowTimes = tomorrow.times || {};
+
+    // 明日出勤するスタッフの今日の終了時間をチェック
+    for (var name in tomorrowTimes) {
+      if (!todayTimes[name]) continue;
+      var todayT = todayTimes[name];
+      var tomorrowT = tomorrowTimes[name];
+      if (!todayT || !tomorrowT) continue;
+
+      var todayEnd = todayT.split('-')[1];
+      var tomorrowStart = tomorrowT.split('-')[0];
+      if (!todayEnd || !tomorrowStart) continue;
+
+      var endParts = todayEnd.split(':');
+      var startParts = tomorrowStart.split(':');
+      var endMin = parseInt(endParts[0]) * 60 + parseInt(endParts[1] || 0);
+      var startMin = parseInt(startParts[0]) * 60 + parseInt(startParts[1] || 0);
+
+      // 日をまたぐ終了時間 (0:30 = 翌日0:30)
+      if (endMin < 6 * 60) endMin += 24 * 60; // 6時前なら前日深夜
+      var interval = (24 * 60 - endMin) + startMin;
+      if (interval < 11 * 60) {
+        errors.push(dates[di] + '→' + dates[di + 1] + ': ' + name + 'の勤務間インターバルが' + Math.round(interval / 60 * 10) / 10 + '時間 (11時間未満)');
+      }
+    }
+  }
+
+  // Check 7: 連続勤務 (6日以内)
+  var staffDates = {}; // { name: [dateStr, ...] }
+  dates.forEach(function(dateStr) {
+    var day = dayMap[dateStr];
+    if (!day) return;
+    var times = day.times || {};
+    for (var name in times) {
+      if (!staffDates[name]) staffDates[name] = [];
+      staffDates[name].push(dateStr);
+    }
+  });
+  for (var name in staffDates) {
+    var sDates = staffDates[name].sort();
+    var consecutive = 1;
+    for (var i = 1; i < sDates.length; i++) {
+      var prev = new Date(sDates[i - 1] + 'T00:00:00');
+      var curr = new Date(sDates[i] + 'T00:00:00');
+      var diffDays = Math.round((curr - prev) / (1000 * 60 * 60 * 24));
+      if (diffDays === 1) {
+        consecutive++;
+        if (consecutive > 6) {
+          errors.push(name + ': ' + sDates[i - 6] + '〜' + sDates[i] + 'で7日以上連続勤務');
+          break;
+        }
+      } else {
+        consecutive = 1;
+      }
+    }
+  }
+
+  // エラー数が多すぎる場合は先頭20件に制限 (再生成プロンプトが長くなりすぎるため)
+  if (errors.length > 20) {
+    var total = errors.length;
+    errors = errors.slice(0, 20);
+    errors.push('...他 ' + (total - 20) + '件のエラー');
+  }
+
+  return errors;
 }
 
 function readWishesFromSheet_(staff, year) {
@@ -1800,6 +2077,9 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
   var staffNames = staff.map(function(s) { return s['氏名']; });
   var retailNames = retailStores.map(function(s) { return s['店舗名']; });
 
+  // 過去シフトパターンを取得
+  var pastPatterns = loadPastShiftPatterns_(staff, dates[0]);
+
   var prompt = '以下の条件でシフトスケジュールを生成してください。\n'
     + '各スタッフを店舗に割り当て、勤務時間を決定してください。\n\n'
     + '## 対象期間\n' + dates[0] + ' ~ ' + dates[dates.length - 1] + ' (' + dates.length + '日間)\n\n'
@@ -1814,13 +2094,28 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
     + '- 遅番: 概ね15:30-0:30（午後-閉店）\n'
     + '- 各店舗に毎日必ず早番1名/遅番1名を配置\n'
     + '- 同一人物が通し勤務する場合あり（例: 11:30-0:30）\n\n'
+    + '## 労働基準法の遵守事項\n'
+    + '- 1日の法定労働時間: 8時間（超過分は時間外労働=残業）\n'
+    + '- 1週間の法定労働時間: 40時間\n'
+    + '- 残業(時間外労働)の上限: 月45時間以内（36協定）\n'
+    + '- 6時間超勤務: 45分以上の休憩が必要\n'
+    + '- 8時間超勤務: 60分以上の休憩が必要\n'
+    + '- 勤務間インターバル: 前日の終業から翌日の始業まで最低11時間確保（努力義務）\n'
+    + '- 深夜労働(22:00-5:00): 25%割増賃金。連続しないよう配慮\n'
+    + '- 週1日以上の休日を必ず確保（法定休日）\n'
+    + '- 連続勤務は原則6日以内\n'
+    + '- アルバイトは特に労働時間の上限に注意\n'
+    + '- コスト最適化: 残業を最小限にするシフトが望ましい。1日8時間以内×週5日が理想\n'
+    + '- 残業が発生する場合は特定のスタッフに偏らないよう均等に分散\n\n'
     + '## 制約\n'
     + '1. 全スタッフ（固定シフト含む）を配置対象とする\n'
     + '2. 各スタッフの週最大労働時間を超えないこと\n'
     + '3. 希望休（×マーク）は必ず尊重する\n'
     + '4. 対応店舗が指定されているスタッフはその店舗のみに配置\n'
     + '5. 最低週1日の休みを確保\n'
-    + '6. 土日祝日も含め全日全店舗カバー\n\n'
+    + '6. 土日祝日も含め全日全店舗カバー\n'
+    + '7. 勤務間インターバル11時間を確保（遅番0:30終了→翌日11:30以降開始）\n'
+    + '8. 連続勤務6日以内\n\n'
     + '## 出力形式（JSONのみ、説明文不要）\n\n'
     + '```json\n{\n'
     + '  "schedule": [\n'
@@ -1848,6 +2143,21 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
     + '- スタッフ名は完全一致: ' + JSON.stringify(staffNames) + '\n'
     + '- 時間は "HH:MM-HH:MM" 形式\n';
 
+  // 過去のシフトパターンを追加
+  if (pastPatterns) {
+    prompt += '\n## 過去の確定シフトパターン (参考)\n'
+      + '以下は直近の確定済みシフトから分析したパターンです。これを参考にしてください:\n'
+      + pastPatterns + '\n';
+  }
+
+  // 過去の修正履歴を追加 (学習)
+  var history = loadCorrectionHistory_();
+  if (history) {
+    prompt += '\n## 過去の修正履歴 (人間がAI提案を修正したパターン)\n'
+      + '以下は過去にAIが生成したシフトに対して人間が行った修正です。同じ傾向の修正が繰り返されないよう、このパターンを学習してください:\n'
+      + history + '\n';
+  }
+
   return prompt;
 }
 
@@ -1864,8 +2174,13 @@ function callClaudeApi_(prompt) {
     },
     payload: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 8192,
-      system: 'あなたはシフト管理の専門家です。与えられた条件を厳密に守り、最適なシフトスケジュールをJSON形式で生成してください。JSONのみを出力し、それ以外のテキストは一切含めないでください。',
+      max_tokens: 16000,
+      temperature: 0,
+      thinking: {
+        type: 'enabled',
+        budget_tokens: 10000,
+      },
+      system: 'あなたはシフト管理の専門家です。与えられた条件を厳密に守り、最適なシフトスケジュールをJSON形式で生成してください。thinkingで十分に検討してから、JSONのみを出力してください。',
       messages: [{ role: 'user', content: prompt }],
     }),
     muteHttpExceptions: true,
@@ -1874,6 +2189,7 @@ function callClaudeApi_(prompt) {
   var result = JSON.parse(resp.getContentText());
   if (result.error) throw new Error('Claude API: ' + JSON.stringify(result.error));
 
+  // extended thinking: thinkingブロックをスキップしてtextブロックのみ取得
   var text = '';
   (result.content || []).forEach(function(block) {
     if (block.type === 'text') text += block.text;
@@ -1987,8 +2303,426 @@ function writeShiftOutput_(result, staff, stores, dates) {
 }
 
 // ==========================================================================
+// AI修正履歴 (学習機能)
+// ==========================================================================
+
+var SN_AI_LOG = 'AI修正履歴';
+
+/**
+ * AI生成結果を一時保存 (Script Properties)
+ * ④実行時にシート上のデータと比較して修正を検出する
+ */
+function saveAiOutput_(result, dates) {
+  // 日付→店舗→スタッフ配置のフラットなマップに変換
+  var flat = {};
+  (result.schedule || []).forEach(function(day) {
+    var dateStr = day.date;
+    var storeAssigns = day.stores || {};
+    var times = day.times || {};
+
+    for (var store in storeAssigns) {
+      var assign = storeAssigns[store];
+      var staffList = [];
+      if (Array.isArray(assign)) {
+        staffList = assign;
+      } else if (typeof assign === 'object') {
+        for (var role in assign) {
+          if (assign[role]) staffList.push(assign[role]);
+        }
+      }
+      staffList.forEach(function(name) {
+        var key = dateStr + '|' + store + '|' + name;
+        flat[key] = times[name] || '';
+      });
+    }
+  });
+
+  // Script Properties に保存 (サイズ制限あるため JSON を圧縮)
+  try {
+    var json = JSON.stringify(flat);
+    // 9KB制限に収まらない場合は日付リストだけ保存
+    if (json.length > 8000) {
+      // 分割保存
+      var props = PropertiesService.getScriptProperties();
+      props.setProperty('AI_OUTPUT_DATES', JSON.stringify(dates));
+      var chunk1 = {}, chunk2 = {};
+      var keys = Object.keys(flat);
+      var half = Math.ceil(keys.length / 2);
+      keys.forEach(function(k, i) {
+        if (i < half) chunk1[k] = flat[k];
+        else chunk2[k] = flat[k];
+      });
+      props.setProperty('AI_OUTPUT_1', JSON.stringify(chunk1));
+      props.setProperty('AI_OUTPUT_2', JSON.stringify(chunk2));
+      props.deleteProperty('AI_OUTPUT');
+    } else {
+      var props = PropertiesService.getScriptProperties();
+      props.setProperty('AI_OUTPUT', json);
+      props.setProperty('AI_OUTPUT_DATES', JSON.stringify(dates));
+      props.deleteProperty('AI_OUTPUT_1');
+      props.deleteProperty('AI_OUTPUT_2');
+    }
+    Logger.log('AI output saved: ' + Object.keys(flat).length + ' assignments');
+  } catch (e) {
+    Logger.log('Failed to save AI output: ' + e.message);
+  }
+}
+
+/**
+ * 保存済みAI出力を読み込む
+ */
+function loadAiOutput_() {
+  var props = PropertiesService.getScriptProperties();
+  var json = props.getProperty('AI_OUTPUT');
+  if (json) return JSON.parse(json);
+
+  var j1 = props.getProperty('AI_OUTPUT_1');
+  var j2 = props.getProperty('AI_OUTPUT_2');
+  if (j1 && j2) {
+    var merged = JSON.parse(j1);
+    var part2 = JSON.parse(j2);
+    for (var k in part2) merged[k] = part2[k];
+    return merged;
+  }
+  return null;
+}
+
+/**
+ * ④確定時にシートの内容とAI出力を比較し、修正を検出・記録する
+ * syncConfirmedShift から呼ばれる
+ */
+function detectAndLogCorrections_(confirmedDates, outputSheet, nameToSid, nrLayout) {
+  var aiOutput = loadAiOutput_();
+  if (!aiOutput) return; // AI出力が保存されていない場合はスキップ
+
+  var corrections = [];
+
+  // シートから現在の配置を読み取り
+  confirmedDates.forEach(function(dateStr) {
+    var day = parseInt(dateStr.split('-')[2], 10);
+    var nameRowNum = OUTPUT_DSTART + (day - 1) * 2;
+    var timeRowNum = nameRowNum + 1;
+
+    // 現在のシート上の配置を収集
+    var currentAssigns = {}; // key: store|staffName, value: time
+
+    // 営業店舗
+    for (var storeName in RETAIL_COLS) {
+      var shifts = RETAIL_COLS[storeName];
+      SHIFT_TYPES.forEach(function(stype) {
+        var cols = shifts[stype];
+        var staffName = String(outputSheet.getRange(nameRowNum, cols.n).getValue()).trim();
+        if (!staffName) return;
+        var startTime = String(outputSheet.getRange(timeRowNum, cols.s).getValue()).trim();
+        var endTime = String(outputSheet.getRange(timeRowNum, cols.e).getValue()).trim();
+        var time = (startTime && endTime) ? startTime + '-' + endTime : '';
+        currentAssigns[storeName + '|' + staffName] = time;
+      });
+    }
+
+    // 非営業店舗
+    for (var nrStoreName in nrLayout.stores) {
+      var nrStoreInfo = nrLayout.stores[nrStoreName];
+      for (var nri = 0; nri < nrStoreInfo.cols.length; nri++) {
+        var pc = nrStoreInfo.cols[nri];
+        var pName = nrStoreInfo.names[nri];
+        if (!pName) continue;
+        var attendance = String(outputSheet.getRange(nameRowNum, pc.s).getValue()).trim();
+        if (!attendance || attendance === '公休') continue;
+        var actualStore = nrStoreName;
+        if (RETAIL_COLS[attendance]) actualStore = attendance;
+        var startTime = String(outputSheet.getRange(timeRowNum, pc.s).getValue()).trim();
+        var endTime = String(outputSheet.getRange(timeRowNum, pc.e).getValue()).trim();
+        var time = (startTime && endTime) ? startTime + '-' + endTime : '';
+        currentAssigns[actualStore + '|' + pName] = time;
+      }
+    }
+
+    // AI出力と比較
+    // AI側のこの日の配置を収集
+    var aiAssigns = {};
+    for (var key in aiOutput) {
+      if (key.indexOf(dateStr + '|') === 0) {
+        var parts = key.split('|');
+        aiAssigns[parts[1] + '|' + parts[2]] = aiOutput[key];
+      }
+    }
+
+    // 差分検出
+    // AIにあって人間が削除した配置
+    for (var aKey in aiAssigns) {
+      if (!currentAssigns[aKey]) {
+        var aParts = aKey.split('|');
+        corrections.push({
+          date: dateStr, store: aParts[0], staff: aParts[1],
+          type: '削除', ai: aiAssigns[aKey], human: '',
+        });
+      }
+    }
+    // 人間が追加した配置
+    for (var cKey in currentAssigns) {
+      if (!aiAssigns[cKey]) {
+        var cParts = cKey.split('|');
+        corrections.push({
+          date: dateStr, store: cParts[0], staff: cParts[1],
+          type: '追加', ai: '', human: currentAssigns[cKey],
+        });
+      }
+    }
+    // 時間が変更された配置
+    for (var key in currentAssigns) {
+      if (aiAssigns[key] && aiAssigns[key] !== currentAssigns[key]) {
+        var kParts = key.split('|');
+        corrections.push({
+          date: dateStr, store: kParts[0], staff: kParts[1],
+          type: '時間変更', ai: aiAssigns[key], human: currentAssigns[key],
+        });
+      }
+    }
+  });
+
+  if (corrections.length === 0) return;
+
+  // 修正履歴シートに記録
+  var logSheet = ss_().getSheetByName(SN_AI_LOG);
+  if (!logSheet) {
+    logSheet = ss_().insertSheet(SN_AI_LOG);
+    logSheet.getRange(1, 1, 1, 7).setValues([['記録日時', '日付', '店舗', 'スタッフ', '修正種別', 'AI提案', '人間修正']]);
+    logSheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#E8EAED');
+  }
+
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  var rows = corrections.map(function(c) {
+    return [now, c.date, c.store, c.staff, c.type, c.ai, c.human];
+  });
+
+  var lastRow = Math.max(logSheet.getLastRow(), 1);
+  logSheet.getRange(lastRow + 1, 1, rows.length, 7).setValues(rows);
+
+  Logger.log('Recorded ' + corrections.length + ' corrections to AI修正履歴');
+}
+
+/**
+ * 過去の修正履歴をプロンプト用テキストとして読み込む
+ * 直近50件を取得
+ */
+function loadCorrectionHistory_() {
+  var logSheet = ss_().getSheetByName(SN_AI_LOG);
+  if (!logSheet) return '';
+
+  var lastRow = logSheet.getLastRow();
+  if (lastRow <= 1) return '';
+
+  // 直近50件
+  var startRow = Math.max(2, lastRow - 49);
+  var numRows = lastRow - startRow + 1;
+  var data = logSheet.getRange(startRow, 1, numRows, 7).getValues();
+
+  // パターン集約: 同じスタッフ×店舗×修正種別をまとめる
+  var patterns = {};
+  data.forEach(function(row) {
+    var staff = row[3];
+    var store = row[2];
+    var type = row[4];
+    var key = staff + '→' + store + '(' + type + ')';
+    if (!patterns[key]) patterns[key] = { count: 0, examples: [] };
+    patterns[key].count++;
+    if (patterns[key].examples.length < 2) {
+      patterns[key].examples.push({
+        date: row[1], ai: row[5], human: row[6],
+      });
+    }
+  });
+
+  var lines = [];
+  for (var key in patterns) {
+    var p = patterns[key];
+    var line = key + ' (' + p.count + '回)';
+    p.examples.forEach(function(ex) {
+      if (ex.ai && ex.human) {
+        line += ' 例: AI=' + ex.ai + '→人間=' + ex.human;
+      } else if (!ex.ai) {
+        line += ' 例: ' + ex.date + 'に人間が追加';
+      } else {
+        line += ' 例: ' + ex.date + 'にAI提案を削除';
+      }
+    });
+    lines.push('- ' + line);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * kintone 212から直近の確定シフトを読み取り、パターンを分析する
+ * @param {Array} staff スタッフ一覧
+ * @param {string} targetStartDate 生成対象の開始日 (これより前のデータを参照)
+ * @return {string} パターン説明テキスト (プロンプト用)
+ */
+function loadPastShiftPatterns_(staff, targetStartDate) {
+  // 対象期間: 生成対象の前月分 (最大31日)
+  var target = new Date(targetStartDate + 'T00:00:00');
+  var prevEnd = new Date(target);
+  prevEnd.setDate(prevEnd.getDate() - 1);
+  var prevStart = new Date(prevEnd);
+  prevStart.setDate(prevStart.getDate() - 30);
+
+  var startStr = Utilities.formatDate(prevStart, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var endStr = Utilities.formatDate(prevEnd, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+  var records = kintoneGetAll_(KINTONE_CONFIRMED_APP,
+    'shift_date >= "' + startStr + '" and shift_date <= "' + endStr
+    + '" and shift_status in ("出勤") order by staff_id asc, shift_date asc');
+
+  if (records.length < 10) return ''; // データ不足
+
+  // スタッフごとの統計
+  var staffStats = {}; // { name: { stores: {store: count}, totalDays: N, avgHours: N, weekdayPattern: {} } }
+  var nameToSid = {};
+  staff.forEach(function(s) { nameToSid[s['氏名']] = s['staff_id']; });
+
+  records.forEach(function(r) {
+    var name = r.staff_name ? r.staff_name.value : '';
+    var store = r.store ? r.store.value : '';
+    var start = r.start_time ? r.start_time.value : '';
+    var end = r.end_time ? r.end_time.value : '';
+    var dateStr = r.shift_date ? r.shift_date.value : '';
+
+    if (!name || !store) return;
+    if (!staffStats[name]) staffStats[name] = { stores: {}, totalDays: 0, totalHours: 0, dowCount: [0,0,0,0,0,0,0] };
+    var s = staffStats[name];
+
+    if (!s.stores[store]) s.stores[store] = 0;
+    s.stores[store]++;
+    s.totalDays++;
+
+    // 勤務時間計算
+    if (start && end) {
+      var sp = start.split(':'), ep = end.split(':');
+      var sm = parseInt(sp[0]) * 60 + parseInt(sp[1] || 0);
+      var em = parseInt(ep[0]) * 60 + parseInt(ep[1] || 0);
+      if (em <= sm) em += 24 * 60;
+      s.totalHours += (em - sm) / 60;
+    }
+
+    // 曜日パターン
+    if (dateStr) {
+      var d = new Date(dateStr + 'T00:00:00');
+      s.dowCount[d.getDay()]++;
+    }
+  });
+
+  // パターンテキスト生成
+  var lines = [];
+  var dowNames = ['日', '月', '火', '水', '木', '金', '土'];
+
+  for (var name in staffStats) {
+    var s = staffStats[name];
+    if (s.totalDays < 3) continue; // データ少なすぎ
+
+    var avgHours = Math.round(s.totalHours / s.totalDays * 10) / 10;
+
+    // 主要店舗 (出勤回数順)
+    var storeEntries = Object.keys(s.stores).map(function(st) {
+      return { name: st, count: s.stores[st] };
+    }).sort(function(a, b) { return b.count - a.count; });
+    var storeText = storeEntries.map(function(e) { return e.name + '(' + e.count + '日)'; }).join(', ');
+
+    // 出勤が多い曜日
+    var workDows = [];
+    var restDows = [];
+    var maxDow = Math.max.apply(null, s.dowCount);
+    for (var di = 0; di < 7; di++) {
+      if (s.dowCount[di] === 0) restDows.push(dowNames[di]);
+      else if (s.dowCount[di] >= maxDow * 0.7) workDows.push(dowNames[di]);
+    }
+
+    var line = name + ': ' + storeText + ', 平均' + avgHours + 'h/日, ' + s.totalDays + '日出勤';
+    if (restDows.length > 0 && restDows.length <= 3) line += ', 休み傾向: ' + restDows.join('');
+    lines.push('- ' + line);
+  }
+
+  if (lines.length === 0) return '';
+  return lines.join('\n');
+}
+
+// ==========================================================================
 // ④ 確定シフト反映 (横型レイアウト対応)
 // ==========================================================================
+
+/**
+ * シートの1日分のデータを読み取る
+ */
+function readDayEntries_(outputSheet, nameRowNum, timeRowNum, dateStr, nameToSid, nrLayout) {
+  var entries = [];
+
+  // Read retail stores
+  for (var storeName in RETAIL_COLS) {
+    var shifts = RETAIL_COLS[storeName];
+    SHIFT_TYPES.forEach(function(stype) {
+      var cols = shifts[stype];
+      var staffName = String(outputSheet.getRange(nameRowNum, cols.n).getValue()).trim();
+      if (!staffName) return;
+
+      var startTime = String(outputSheet.getRange(timeRowNum, cols.s).getValue()).trim();
+      var endTime = String(outputSheet.getRange(timeRowNum, cols.e).getValue()).trim();
+
+      entries.push({
+        date: dateStr,
+        staff_id: nameToSid[staffName] || '',
+        staff_name: staffName,
+        store: storeName,
+        start_time: startTime,
+        end_time: endTime,
+        time_range: startTime && endTime ? startTime + '-' + endTime : '',
+        shift_type: stype,
+        shift_status: '出勤',
+      });
+    });
+  }
+
+  // Read non-retail stores (dynamic)
+  for (var nrStoreName in nrLayout.stores) {
+    var nrStoreInfo = nrLayout.stores[nrStoreName];
+    for (var nri = 0; nri < nrStoreInfo.cols.length; nri++) {
+      var pc = nrStoreInfo.cols[nri];
+      var pName = nrStoreInfo.names[nri];
+      if (!pName) continue;
+
+      var attendance = String(outputSheet.getRange(nameRowNum, pc.s).getValue()).trim();
+      if (!attendance) continue;
+
+      var actualStore = nrStoreName;
+      var shiftStatus = '出勤';
+      if (attendance === '公休') {
+        shiftStatus = '公休';
+      } else if (RETAIL_COLS[attendance]) {
+        actualStore = attendance;
+      }
+
+      var startTime = '';
+      var endTime = '';
+      if (shiftStatus === '出勤') {
+        startTime = String(outputSheet.getRange(timeRowNum, pc.s).getValue()).trim();
+        endTime = String(outputSheet.getRange(timeRowNum, pc.e).getValue()).trim();
+      }
+
+      entries.push({
+        date: dateStr,
+        staff_id: nameToSid[pName] || '',
+        staff_name: pName,
+        store: actualStore,
+        start_time: startTime,
+        end_time: endTime,
+        time_range: startTime && endTime ? startTime + '-' + endTime : '',
+        shift_type: '',
+        shift_status: shiftStatus,
+      });
+    }
+  }
+
+  return entries;
+}
 
 function syncConfirmedShift() {
   ensureTrigger_();
@@ -2010,133 +2744,182 @@ function syncConfirmedShift() {
     var nameToSid = {};
     staff.forEach(function(s) { nameToSid[s['氏名']] = s['staff_id']; });
 
-    // Read dynamic non-retail layout from headers
     var nrLayout = readNonRetailLayout_(outputSheet);
-
     var lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
 
-    var confirmedDays = [];
-    var changedDays = [];
-    var confirmedRowNums = [];
-    var changedRowNums = [];
+    // --- kintone 212 の既存レコードを取得 ---
+    var monthStart = year + '-' + m + '-01';
+    var monthEnd = year + '-' + m + '-' + ('0' + lastDay).slice(-2);
+    var existingRecords = kintoneGetAll_(KINTONE_CONFIRMED_APP,
+      'shift_date >= "' + monthStart + '" and shift_date <= "' + monthEnd + '" order by staff_id asc, shift_date asc');
+
+    // 日付ごとにkintoneレコードIDを集める
+    var kintoneByDate = {};
+    existingRecords.forEach(function(r) {
+      var d = r.shift_date.value;
+      if (!kintoneByDate[d]) kintoneByDate[d] = [];
+      kintoneByDate[d].push(r['$id'].value);
+    });
+
+    // --- シートをスキャンして3カテゴリに分類 ---
+    var newEntries = [];     // 確定ON & kintone未登録 → 新規追加
+    var updateEntries = [];  // 確定ON & 変更ON → 更新
+    var deleteDates = [];    // 確定OFF & kintone登録済 → 削除
+    var changeRowNums = [];  // 変更チェックを外す行
 
     for (var day = 1; day <= lastDay; day++) {
       var nameRowNum = OUTPUT_DSTART + (day - 1) * 2;
       var timeRowNum = nameRowNum + 1;
+      var dateStr = year + '-' + m + '-' + ('0' + day).slice(-2);
 
       var isConfirmed = outputSheet.getRange(nameRowNum, 1).getValue() === true;
       var isChanged = outputSheet.getRange(nameRowNum, 2).getValue() === true;
-      if (!isConfirmed && !isChanged) continue;
+      var existsInKintone = !!kintoneByDate[dateStr];
 
-      var dateStr = year + '-' + m + '-' + ('0' + day).slice(-2);
-
-      // Read retail stores
-      for (var storeName in RETAIL_COLS) {
-        var shifts = RETAIL_COLS[storeName];
-        SHIFT_TYPES.forEach(function(stype) {
-          var cols = shifts[stype];
-          var staffName = String(outputSheet.getRange(nameRowNum, cols.n).getValue()).trim();
-          if (!staffName) return;
-
-          var startTime = String(outputSheet.getRange(timeRowNum, cols.s).getValue()).trim();
-          var endTime = String(outputSheet.getRange(timeRowNum, cols.e).getValue()).trim();
-
-          var entry = {
-            date: dateStr,
-            staff_id: nameToSid[staffName] || '',
-            staff_name: staffName,
-            store: storeName,
-            start_time: startTime,
-            end_time: endTime,
-            time_range: startTime && endTime ? startTime + '-' + endTime : '',
-            shift_type: stype,
-            shift_status: '出勤',
-          };
-          if (isConfirmed) confirmedDays.push(entry);
-          if (isChanged) changedDays.push(entry);
-        });
-      }
-
-      // Read non-retail stores (dynamic)
-      for (var nrStoreName in nrLayout.stores) {
-        var nrStoreInfo = nrLayout.stores[nrStoreName];
-        for (var nri = 0; nri < nrStoreInfo.cols.length; nri++) {
-          var pc = nrStoreInfo.cols[nri];
-          var pName = nrStoreInfo.names[nri];
-          if (!pName) continue;
-
-          var attendance = String(outputSheet.getRange(nameRowNum, pc.s).getValue()).trim();
-          if (!attendance) continue;
-
-          // 営業店舗名が入っている場合はその店舗への出勤として扱う
-          var actualStore = nrStoreName;
-          var shiftStatus = '出勤';
-          if (attendance === '公休') {
-            shiftStatus = '公休';
-          } else if (RETAIL_COLS[attendance]) {
-            actualStore = attendance;
-          }
-
-          var startTime = '';
-          var endTime = '';
-
-          if (shiftStatus === '出勤') {
-            startTime = String(outputSheet.getRange(timeRowNum, pc.s).getValue()).trim();
-            endTime = String(outputSheet.getRange(timeRowNum, pc.e).getValue()).trim();
-          }
-
-          var entry = {
-            date: dateStr,
-            staff_id: nameToSid[pName] || '',
-            staff_name: pName,
-            store: actualStore,
-            start_time: startTime,
-            end_time: endTime,
-            time_range: startTime && endTime ? startTime + '-' + endTime : '',
-            shift_type: '',
-            shift_status: shiftStatus,
-          };
-          if (isConfirmed) confirmedDays.push(entry);
-          if (isChanged) changedDays.push(entry);
+      if (isConfirmed && isChanged) {
+        // 変更あり → 既存データを更新
+        var entries = readDayEntries_(outputSheet, nameRowNum, timeRowNum, dateStr, nameToSid, nrLayout);
+        updateEntries = updateEntries.concat(entries);
+        changeRowNums.push(nameRowNum);
+      } else if (isConfirmed && !isChanged) {
+        if (!existsInKintone) {
+          // 新規確定
+          var entries = readDayEntries_(outputSheet, nameRowNum, timeRowNum, dateStr, nameToSid, nrLayout);
+          newEntries = newEntries.concat(entries);
         }
+        // 既にkintoneにある → スキップ
+      } else if (!isConfirmed && existsInKintone) {
+        // 確定チェックOFF & kintoneに存在 → 削除
+        deleteDates.push(dateStr);
       }
-
-      if (isConfirmed) confirmedRowNums.push(nameRowNum);
-      if (isChanged) changedRowNums.push(nameRowNum);
     }
 
-    var totalDays = confirmedDays.concat(changedDays);
-    if (!totalDays.length) {
-      ui.alert('確定または変更チェックが入った日のデータがありません。');
+    if (!newEntries.length && !updateEntries.length && !deleteDates.length) {
+      ui.alert('処理対象がありません。\n\n新規確定・変更・削除いずれも検出されませんでした。');
       return;
     }
 
-    var allDates = totalDays.map(function(d) { return d.date; }).sort();
-    var periodStart = allDates[0];
-    var periodEnd = allDates[allDates.length - 1];
-
-    var confirmMsg = '確定: ' + confirmedDays.length + '件\n変更: ' + changedDays.length + '件\n\nkintoneとGoogleカレンダーに反映しますか？';
+    // --- 確認ダイアログ ---
+    var msgParts = [];
+    if (newEntries.length) msgParts.push('新規確定: ' + newEntries.length + '件');
+    if (updateEntries.length) msgParts.push('変更更新: ' + updateEntries.length + '件');
+    if (deleteDates.length) msgParts.push('削除: ' + deleteDates.length + '日分');
+    var confirmMsg = msgParts.join('\n') + '\n\nkintoneとGoogleカレンダーに反映しますか？';
     if (ui.alert('確定シフト反映', confirmMsg, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
 
-    var kintoneResult = syncToKintone_(totalDays, periodStart, periodEnd, approver, approvedAt, '');
-    var calResult = syncToCalendar_(totalDays, year);
+    var kintoneAdded = 0, kintoneUpdated = 0, kintoneDeleted = 0;
+    var calCreated = 0, calDeleted = 0;
 
-    // Uncheck processed rows
-    confirmedRowNums.forEach(function(rowNum) { outputSheet.getRange(rowNum, 1).setValue(false); });
-    changedRowNums.forEach(function(rowNum) { outputSheet.getRange(rowNum, 2).setValue(false); });
+    // --- 1) 新規確定 → kintone追加 + カレンダー作成 ---
+    if (newEntries.length) {
+      var allDates = newEntries.map(function(d) { return d.date; });
+      var periodStart = allDates.sort()[0];
+      var periodEnd = allDates[allDates.length - 1];
+      var kr = syncToKintone_(newEntries, periodStart, periodEnd, approver, approvedAt, '');
+      kintoneAdded += kr.added;
+      kintoneUpdated += kr.updated;
+      var cr = syncToCalendar_(newEntries, year, false);
+      calCreated += cr.created;
+    }
+
+    // --- 2) 変更更新 → kintone: 対象日の既存レコードを全削除→再追加 + カレンダー削除→再作成 ---
+    if (updateEntries.length) {
+      // 変更対象の日付を取得
+      var updateDateSet = {};
+      updateEntries.forEach(function(d) { updateDateSet[d.date] = true; });
+      var updateDateList = Object.keys(updateDateSet).sort();
+
+      // 対象日のkintone既存レコードを全削除
+      var updateIdsToDelete = [];
+      updateDateList.forEach(function(dateStr) {
+        if (kintoneByDate[dateStr]) {
+          updateIdsToDelete = updateIdsToDelete.concat(kintoneByDate[dateStr]);
+        }
+      });
+      for (var i = 0; i < updateIdsToDelete.length; i += 100) {
+        var batch = updateIdsToDelete.slice(i, i + 100).map(function(id) { return parseInt(id, 10); });
+        kintoneDelete_(KINTONE_CONFIRMED_APP, batch);
+      }
+      kintoneDeleted += updateIdsToDelete.length;
+
+      // 新しいデータを追加
+      var periodStart = updateDateList[0];
+      var periodEnd = updateDateList[updateDateList.length - 1];
+      var addRecords = [];
+      updateEntries.forEach(function(d) {
+        var record = {
+          staff_id: { value: d.staff_id },
+          staff_name: { value: d.staff_name },
+          shift_date: { value: d.date },
+          shift_status: { value: d.shift_status || '出勤' },
+          period_start: { value: periodStart },
+          period_end: { value: periodEnd },
+          confirmed_by: { value: approver },
+          confirmed_at: { value: approvedAt },
+        };
+        if (d.store) record.store = { value: d.store };
+        if (d.start_time) record.start_time = { value: d.start_time };
+        if (d.end_time) record.end_time = { value: d.end_time };
+        addRecords.push(record);
+      });
+      for (var i = 0; i < addRecords.length; i += 100) {
+        kintonePost_(KINTONE_CONFIRMED_APP, addRecords.slice(i, i + 100));
+      }
+      kintoneAdded += addRecords.length;
+
+      // カレンダー: 削除→再作成
+      var cr = syncToCalendar_(updateEntries, year, true);
+      calDeleted += cr.deleted;
+      calCreated += cr.created;
+    }
+
+    // --- 3) 削除 → kintoneレコード削除 + カレンダーイベント削除 ---
+    if (deleteDates.length) {
+      // kintone削除
+      var idsToDelete = [];
+      deleteDates.forEach(function(dateStr) {
+        if (kintoneByDate[dateStr]) {
+          idsToDelete = idsToDelete.concat(kintoneByDate[dateStr]);
+        }
+      });
+      for (var i = 0; i < idsToDelete.length; i += 100) {
+        var batch = idsToDelete.slice(i, i + 100).map(function(id) { return parseInt(id, 10); });
+        kintoneDelete_(KINTONE_CONFIRMED_APP, batch);
+      }
+      kintoneDeleted = idsToDelete.length;
+
+      // カレンダー削除
+      var dr = deleteCalendarEvents_(deleteDates);
+      calDeleted += dr.deleted;
+    }
+
+    // --- 変更チェックだけ外す (確定チェックは触らない) ---
+    changeRowNums.forEach(function(rowNum) { outputSheet.getRange(rowNum, 2).setValue(false); });
+
+    // --- AI修正履歴: 確定データとAI出力を比較して修正を記録 ---
+    var allConfirmedDates = [];
+    newEntries.concat(updateEntries).forEach(function(e) {
+      if (allConfirmedDates.indexOf(e.date) < 0) allConfirmedDates.push(e.date);
+    });
+    if (allConfirmedDates.length > 0) {
+      try {
+        detectAndLogCorrections_(allConfirmedDates, outputSheet, nameToSid, nrLayout);
+      } catch (logErr) {
+        Logger.log('Correction logging error: ' + logErr.message);
+      }
+    }
 
     ui.alert(
       '確定シフト反映完了\n\n' +
-      '確定: ' + confirmedDays.length + '件 / 変更: ' + changedDays.length + '件\n' +
-      'kintone: 新規 ' + kintoneResult.added + '件 / 更新 ' + kintoneResult.updated + '件\n' +
-      'Google Calendar: ' + calResult.created + '件作成 / ' + calResult.deleted + '件削除'
+      '新規: ' + kintoneAdded + '件 / 更新: ' + kintoneUpdated + '件 / 削除: ' + kintoneDeleted + '件\n' +
+      'カレンダー: ' + calCreated + '件作成 / ' + calDeleted + '件削除'
     );
 
-    slackPost_(
-      '*確定シフト反映完了*\n' +
-      '対象期間: ' + periodStart + ' ~ ' + periodEnd + '\n' +
-      '確定: ' + confirmedDays.length + '件 / 変更: ' + changedDays.length + '件'
-    );
+    var slackParts = ['*確定シフト反映完了*'];
+    if (newEntries.length) slackParts.push('新規確定: ' + kintoneAdded + '件');
+    if (updateEntries.length) slackParts.push('変更更新: ' + kintoneUpdated + '件');
+    if (deleteDates.length) slackParts.push('削除: ' + kintoneDeleted + '件');
+    slackPost_(slackParts.join('\n'));
   } catch (e) {
     slackError_('syncConfirmedShift', e.message);
     ui.alert('エラー: ' + e.message);
@@ -2144,12 +2927,12 @@ function syncConfirmedShift() {
 }
 
 function syncToKintone_(confirmedDays, periodStart, periodEnd, approver, approvedAt, scheduleVersion) {
-  var query = 'period_start = "' + periodStart + '" and period_end = "' + periodEnd
-    + '" order by staff_id asc, shift_date asc limit 500';
-  var existing = kintoneGet_(KINTONE_CONFIRMED_APP, query);
+  // 対象日付の既存レコードを取得 (staff_id + shift_date + store で upsert)
+  var existing = kintoneGetAll_(KINTONE_CONFIRMED_APP,
+    'shift_date >= "' + periodStart + '" and shift_date <= "' + periodEnd + '" order by staff_id asc, shift_date asc');
   var existMap = {};
-  (existing.records || []).forEach(function(r) {
-    var key = r.staff_id.value + '_' + r.shift_date.value;
+  existing.forEach(function(r) {
+    var key = (r.staff_id ? r.staff_id.value : '') + '_' + r.shift_date.value + '_' + (r.store ? r.store.value : '');
     existMap[key] = r['$id'].value;
   });
 
@@ -2172,7 +2955,7 @@ function syncToKintone_(confirmedDays, periodStart, periodEnd, approver, approve
     if (d.start_time) record.start_time = { value: d.start_time };
     if (d.end_time) record.end_time = { value: d.end_time };
 
-    var key = d.staff_id + '_' + d.date;
+    var key = d.staff_id + '_' + d.date + '_' + (d.store || '');
     var rid = existMap[key];
     if (rid) {
       toUpdate.push({ id: rid, record: record });
@@ -2194,21 +2977,23 @@ function syncToKintone_(confirmedDays, periodStart, periodEnd, approver, approve
   return { added: added, updated: updated };
 }
 
-function syncToCalendar_(confirmedDays, year) {
+// Store title and color mapping (shared by calendar functions)
+var STORE_CAL_CONFIG = {
+  '藤沢': { title: '藤沢店', colorId: '9' },
+  '伊勢佐木町': { title: '伊勢佐木町店', colorId: '10' },
+  '新宿': { title: '新宿店', colorId: '6' },
+  '工場': { title: '工場', colorId: '5' },
+  '本部オフィス': { title: '本部オフィス', colorId: '8' },
+  'EC': { title: 'EC', colorId: '3' },
+};
+
+/**
+ * カレンダーにイベントを作成 (deleteOld=trueの場合は既存を先に削除)
+ */
+function syncToCalendar_(confirmedDays, year, deleteOld) {
   var calId = getProp_('SHIFT_CALENDAR_ID');
   if (!calId) throw new Error('SHIFT_CALENDAR_IDが設定されていません');
 
-  // Store title and color mapping
-  var storeConfig = {
-    '藤沢': { title: '藤沢店', colorId: '9' },
-    '伊勢佐木町': { title: '伊勢佐木町店', colorId: '10' },
-    '新宿': { title: '新宿店', colorId: '6' },
-    '工場': { title: '工場', colorId: '5' },
-    '本部オフィス': { title: '本部オフィス', colorId: '8' },
-    'EC': { title: 'EC', colorId: '3' },
-  };
-
-  // Build staff name → email mapping
   var staffMaster = readStaffMaster_();
   var nameToEmail = {};
   staffMaster.forEach(function(s) {
@@ -2225,42 +3010,33 @@ function syncToCalendar_(confirmedDays, year) {
   });
 
   var deleted = 0, created = 0;
+  var cal = CalendarApp.getCalendarById(calId);
   var token = ScriptApp.getOAuthToken();
 
-  // Delete existing events for affected dates
-  var processedDates = {};
   for (var key in byDateStore) {
-    var dateStr = byDateStore[key].date;
-    if (processedDates[dateStr]) continue;
-    processedDates[dateStr] = true;
+    var entry = byDateStore[key];
+    var config = STORE_CAL_CONFIG[entry.store];
+    if (!config) continue;
 
-    var d = new Date(dateStr + 'T00:00:00');
-    var nextDay = new Date(d);
-    nextDay.setDate(nextDay.getDate() + 1);
-
-    // Search by store titles to find existing events
-    for (var storeName in storeConfig) {
-      var title = storeConfig[storeName].title;
+    // --- 既存イベント削除 (変更更新時のみ) ---
+    if (deleteOld) {
+      var d = new Date(entry.date + 'T00:00:00');
+      var nextD = new Date(d);
+      nextD.setDate(nextD.getDate() + 1);
       try {
-        var cal = CalendarApp.getCalendarById(calId);
-        var existingEvents = cal.getEvents(d, nextDay, { search: title });
+        var existingEvents = cal.getEvents(d, nextD, { search: config.title });
         existingEvents.forEach(function(ev) {
-          if (ev.getTitle() === title) {
+          if (ev.getTitle() === config.title) {
             ev.deleteEvent();
             deleted++;
           }
         });
-      } catch (e) {}
+      } catch (e) {
+        Logger.log('Calendar delete error: ' + e.message);
+      }
     }
-  }
 
-  // Create new events via Calendar API (for colorId and attendees support)
-  for (var key in byDateStore) {
-    var entry = byDateStore[key];
-    var config = storeConfig[entry.store];
-    if (!config) continue;
-
-    // Build description
+    // --- イベント作成 ---
     var descLines = [];
     entry.staff.sort(function(a, b) { return (a.start_time || '99') < (b.start_time || '99') ? -1 : 1; });
     entry.staff.forEach(function(s) {
@@ -2271,7 +3047,6 @@ function syncToCalendar_(confirmedDays, year) {
       }
     });
 
-    // Build attendees
     var attendees = [];
     entry.staff.forEach(function(s) {
       var email = nameToEmail[s.staff_name];
@@ -2292,7 +3067,7 @@ function syncToCalendar_(confirmedDays, year) {
     };
 
     try {
-      UrlFetchApp.fetch(
+      var resp = UrlFetchApp.fetch(
         'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId) + '/events?sendUpdates=none',
         {
           method: 'post',
@@ -2302,11 +3077,50 @@ function syncToCalendar_(confirmedDays, year) {
           muteHttpExceptions: true,
         }
       );
-      created++;
+      var code = resp.getResponseCode();
+      if (code >= 200 && code < 300) {
+        created++;
+      } else {
+        Logger.log('Calendar create failed (' + code + '): ' + resp.getContentText());
+      }
     } catch (e) {
-      Logger.log('Calendar error: ' + e.message);
+      Logger.log('Calendar create error: ' + e.message);
     }
   }
 
   return { created: created, deleted: deleted };
+}
+
+/**
+ * 指定日付のカレンダーイベントを全店舗分削除
+ */
+function deleteCalendarEvents_(dates) {
+  var calId = getProp_('SHIFT_CALENDAR_ID');
+  if (!calId) return { deleted: 0 };
+
+  var cal = CalendarApp.getCalendarById(calId);
+  var deleted = 0;
+
+  dates.forEach(function(dateStr) {
+    var d = new Date(dateStr + 'T00:00:00');
+    var nextD = new Date(d);
+    nextD.setDate(nextD.getDate() + 1);
+
+    for (var storeName in STORE_CAL_CONFIG) {
+      var title = STORE_CAL_CONFIG[storeName].title;
+      try {
+        var events = cal.getEvents(d, nextD, { search: title });
+        events.forEach(function(ev) {
+          if (ev.getTitle() === title) {
+            ev.deleteEvent();
+            deleted++;
+          }
+        });
+      } catch (e) {
+        Logger.log('Calendar delete error: ' + e.message);
+      }
+    }
+  });
+
+  return { deleted: deleted };
 }
