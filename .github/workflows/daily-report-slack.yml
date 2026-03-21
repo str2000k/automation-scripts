@@ -1,0 +1,43 @@
+name: Daily Report Slack
+
+on:
+  schedule:
+    # 毎日 11:00 JST (= 02:00 UTC)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '対象日 (YYYY-MM-DD)。空欄で前日'
+        required: false
+      dry_run:
+        description: 'dry-runモード'
+        type: boolean
+        default: false
+
+jobs:
+  post-daily-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Post daily report to Slack
+        working-directory: scripts/shift-management
+        env:
+          KINTONE_DOMAIN: ${{ secrets.KINTONE_DOMAIN }}
+          KINTONE_USERNAME: ${{ secrets.KINTONE_USERNAME }}
+          KINTONE_PASSWORD: ${{ secrets.KINTONE_PASSWORD }}
+          DAILY_REPORT_SLACK_TOKEN: ${{ secrets.DAILY_REPORT_SLACK_TOKEN }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.date }}" ]; then
+            ARGS="--date ${{ inputs.date }}"
+          fi
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            ARGS="$ARGS --no-dry-run"
+          fi
+          python3 daily_report_slack.py $ARGS
