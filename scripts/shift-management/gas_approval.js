@@ -149,14 +149,20 @@ function dailyShiftReminder() {
   var staff = readStaffMaster_();
 
   if (periodInfo.type === 'start') {
-    // 全スタッフに開始通知
+    // kintone 211に未入力レコードを一括生成 (希望シフトスタッフ分)
+    var initCount = initShiftRequests_(staff, periodInfo.periodStart, periodInfo.periodEnd);
+
+    // チャンネル通知
     var text = '*シフト希望入力を開始してください*\n'
       + '対象期間: ' + periodInfo.periodStart + ' 〜 ' + periodInfo.periodEnd + '\n'
       + '締切: *' + periodInfo.deadline + '*\n'
-      + '希望シフトスタッフ → 出勤可能な日時を入力\n'
-      + '固定シフトスタッフ → 希望休がある場合は入力（なしでも「入力済」にしてください）';
+      + '希望シフトスタッフ → DMのボタンから出勤日時を入力\n'
+      + '固定シフトスタッフ → DMのボタンから希望休を入力';
     slackPost_(text);
-    Logger.log('Shift collection start notification sent: ' + periodInfo.periodStart + ' ~ ' + periodInfo.periodEnd);
+
+    // 個別DM送信
+    var dmCount = sendShiftCollectionDMs_(staff, periodInfo.periodStart, periodInfo.periodEnd, periodInfo.deadline);
+    Logger.log('Shift collection start: init=' + initCount + ' records, ' + dmCount + ' DMs sent');
     return;
   }
 
@@ -1172,6 +1178,169 @@ function slackPost_(text, blocks) {
 function slackError_(location, msg) {
   var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   slackPost_('【エラー通知】発生箇所:' + location + ' エラー:' + msg + ' 日時:' + now);
+}
+
+/**
+ * Slack DMで個別にシフト希望を送信する
+ * 希望シフト → 日付ごとのボタン付きDM
+ * 固定シフト → 希望休入力DM
+ * @return {number} 送信したDM数
+ */
+function sendShiftCollectionDMs_(staff, periodStart, periodEnd, deadline) {
+  var token = getProp_('SLACK_BOT_TOKEN');
+  if (!token) return 0;
+
+  var sent = 0;
+
+  // 日付リスト生成
+  var dates = generateDates_(periodStart, periodEnd);
+
+  staff.forEach(function(s) {
+    var slackId = s['Slack ID'];
+    if (!slackId) return;
+    var staffId = s['staff_id'];
+    var workStyle = s['働き方'];
+
+    try {
+      if (workStyle === '希望シフト' || workStyle === '混合') {
+        // 希望シフト: 日付ごとにボタン付きメッセージ
+        var blocks = [
+          { type: 'header', text: { type: 'plain_text', text: 'シフト希望入力' } },
+          { type: 'section', fields: [
+            { type: 'mrkdwn', text: '*対象期間:*\n' + periodStart + ' 〜 ' + periodEnd },
+            { type: 'mrkdwn', text: '*回答期限:*\n' + deadline },
+          ] },
+          { type: 'divider' },
+          { type: 'section', text: { type: 'mrkdwn', text: '各日付のボタンを押して出勤/休み/希望休を選んでください。' } },
+        ];
+
+        dates.forEach(function(dateStr) {
+          var d = new Date(dateStr + 'T00:00:00');
+          var dow = DOW_JP[d.getDay()];
+          blocks.push({
+            type: 'section',
+            block_id: 'shift_' + dateStr,
+            text: { type: 'mrkdwn', text: '*' + dateStr + '（' + dow + '）*' },
+          });
+          blocks.push({
+            type: 'actions',
+            block_id: 'actions_' + dateStr,
+            elements: [
+              { type: 'button', text: { type: 'plain_text', text: '✅ 出勤' }, style: 'primary', value: staffId, action_id: 'shift_' + dateStr + '_出勤' },
+              { type: 'button', text: { type: 'plain_text', text: '😴 休み' }, value: staffId, action_id: 'shift_' + dateStr + '_休み' },
+              { type: 'button', text: { type: 'plain_text', text: '🙏 希望休' }, style: 'danger', value: staffId, action_id: 'shift_' + dateStr + '_希望休' },
+            ],
+          });
+        });
+
+        slackDM_(token, slackId, blocks, '【シフト希望入力】' + periodStart + '〜' + periodEnd);
+        sent++;
+
+      } else if (workStyle === '固定シフト') {
+        // 固定シフト: 希望休入力
+        var countOptions = [];
+        for (var n = 1; n <= 8; n++) {
+          countOptions.push({ text: { type: 'plain_text', text: n + '日' }, value: String(n) });
+        }
+
+        var blocks = [
+          { type: 'header', text: { type: 'plain_text', text: '📅 希望休の入力' } },
+          { type: 'section', fields: [
+            { type: 'mrkdwn', text: '*対象期間:*\n' + periodStart + ' 〜 ' + periodEnd },
+            { type: 'mrkdwn', text: '*回答期限:*\n' + deadline },
+          ] },
+          { type: 'divider' },
+          { type: 'section', text: { type: 'mrkdwn', text: '希望休がある場合は日数を選んで日付を入力してください。\n希望休がない場合は「希望休なし」を押してください。' } },
+          { type: 'actions', block_id: 'fixed_actions', elements: [
+            { type: 'static_select', action_id: 'fixedcount', placeholder: { type: 'plain_text', text: '希望休の日数' }, options: countOptions },
+            { type: 'button', text: { type: 'plain_text', text: '希望休なし' }, value: staffId + '|' + periodStart + '|' + periodEnd, action_id: 'fixednone' },
+          ] },
+        ];
+
+        slackDM_(token, slackId, blocks, '【希望休入力】' + periodStart + '〜' + periodEnd);
+        sent++;
+      }
+    } catch (e) {
+      Logger.log('DM send failed for ' + s['氏名'] + ': ' + e.message);
+    }
+  });
+
+  return sent;
+}
+
+/**
+ * Slack DMを送信する (chat.postMessage to user ID)
+ */
+function slackDM_(token, userId, blocks, fallbackText) {
+  UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'Authorization': 'Bearer ' + token },
+    payload: JSON.stringify({
+      channel: userId,
+      blocks: blocks,
+      text: fallbackText,
+    }),
+    muteHttpExceptions: true,
+  });
+}
+
+/**
+ * kintone 211に希望シフトスタッフの未入力レコードを一括生成する
+ * (staff_id, shift_date) の重複チェック済み → 冪等
+ * @return {number} 生成したレコード数
+ */
+function initShiftRequests_(staff, periodStart, periodEnd) {
+  // 希望シフトスタッフのみ対象
+  var targetStaff = staff.filter(function(s) {
+    return s['働き方'] === '希望シフト' || s['働き方'] === '混合';
+  });
+  if (!targetStaff.length) return 0;
+
+  var dates = generateDates_(periodStart, periodEnd);
+
+  // 既存レコードの (staff_id, shift_date) を取得
+  var existing = kintoneGetAll_(KINTONE_WISH_APP,
+    'target_period_start = "' + periodStart + '" and target_period_end = "' + periodEnd + '" order by staff_id asc');
+  var existingKeys = {};
+  existing.forEach(function(r) {
+    var key = (r.staff_id ? r.staff_id.value : '') + '_' + (r.shift_date ? r.shift_date.value : '');
+    existingKeys[key] = true;
+  });
+
+  // 未存在のレコードを生成
+  var toCreate = [];
+  dates.forEach(function(dateStr) {
+    targetStaff.forEach(function(s) {
+      var key = s['staff_id'] + '_' + dateStr;
+      if (existingKeys[key]) return;
+      toCreate.push({
+        staff_id: { value: s['staff_id'] },
+        staff_name: { value: s['氏名'] },
+        shift_date: { value: dateStr },
+        shift_type: { value: '出勤' },
+        work_time_type: { value: 'フリー' },
+        input_status: { value: '未入力' },
+        target_period_start: { value: periodStart },
+        target_period_end: { value: periodEnd },
+      });
+    });
+  });
+
+  if (!toCreate.length) {
+    Logger.log('initShiftRequests_: all records already exist (' + existing.length + ')');
+    return 0;
+  }
+
+  // 100件バッチで登録
+  var created = 0;
+  for (var i = 0; i < toCreate.length; i += 100) {
+    kintonePost_(KINTONE_WISH_APP, toCreate.slice(i, i + 100));
+    created += Math.min(100, toCreate.length - i);
+  }
+
+  Logger.log('initShiftRequests_: created ' + created + ' records for ' + periodStart + '~' + periodEnd);
+  return created;
 }
 
 // ==========================================================================
