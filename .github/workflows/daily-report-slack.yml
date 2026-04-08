@@ -1,9 +1,8 @@
 name: Daily Report Slack
 
 on:
-  schedule:
-    # 毎日 11:00 JST (= 02:00 UTC)
-    - cron: '0 2 * * *'
+  repository_dispatch:
+    types: [daily-report]
   workflow_dispatch:
     inputs:
       date:

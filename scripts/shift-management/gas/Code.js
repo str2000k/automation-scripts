@@ -409,6 +409,8 @@ var CONFIG_DEFAULTS_ = {
   'SLACK_BOT_TOKEN': '',
   'SLACK_SHIFT_CHANNEL': 'C0AKBJ1LTV2',
   'SHIFT_CALENDAR_ID': '',
+  'DAILY_REPORT_SLACK_TOKEN': '',
+  'DAILY_REPORT_CHANNEL': 'C082B8480V6',
 };
 
 function getProp_(key) {
@@ -1475,4 +1477,261 @@ function syncToCalendar_(confirmedDays, year) {
   }
 
   return { created: created, deleted: deleted };
+}
+
+// ==========================================================================
+// ⑥ 日報報告 Slack投稿 (毎日11:00 タイムトリガー)
+// ==========================================================================
+
+var DAILY_REPORT_APP = 110;
+var STORE_ORDER_ = ['チラクシー新宿店','チラクシー麻布店','チラクシー伊勢佐木町店','グッチル藤沢本店','グッチル百人町店'];
+var STORE_SHORT_ = {'チラクシー新宿店':'新宿','チラクシー麻布店':'麻布','チラクシー伊勢佐木町店':'伊勢佐木町','グッチル藤沢本店':'藤沢','グッチル百人町店':'百人町'};
+var WEATHER_EMOJI_ = {'晴れ':'☀️','曇り':'☁️','雨':'🌧️','雪':'❄️'};
+
+/**
+ * 日報報告をSlackに投稿する (タイムトリガーから呼ばれる)
+ * 前日の日報をkintone App 110から取得し、Block Kit形式でSlackに投稿
+ */
+function postDailyReport() {
+  var yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  var targetDate = Utilities.formatDate(yesterday, 'Asia/Tokyo', 'yyyy-MM-dd');
+  postDailyReportForDate_(targetDate);
+}
+
+function postDailyReportForDate_(targetDate) {
+  var token = getProp_('DAILY_REPORT_SLACK_TOKEN');
+  var channel = getProp_('DAILY_REPORT_CHANNEL') || 'C082B8480V6';
+  if (!token) { Logger.log('DAILY_REPORT_SLACK_TOKEN not set'); return; }
+
+  var query = '日付 = "' + targetDate + '" and 店舗名 not in ("見本入力") order by 店舗名 asc';
+  var result = kintoneGet_(DAILY_REPORT_APP, query);
+  var records = result.records || [];
+  if (records.length === 0) { Logger.log('No reports for ' + targetDate); return; }
+
+  // Sort by store order
+  records.sort(function(a, b) {
+    var ia = STORE_ORDER_.indexOf(fv_(a, '店舗名'));
+    var ib = STORE_ORDER_.indexOf(fv_(b, '店舗名'));
+    return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+  });
+
+  var dt = new Date(targetDate + 'T00:00:00+09:00');
+  var dow = DOW_JP[dt.getDay()];
+
+  // Build & post summary
+  var summaryBlocks = buildDailySummary_(records, dt, dow);
+  dailySlackPost_(token, channel, '📋 日報報告 ' + (dt.getMonth()+1) + '/' + dt.getDate() + '（' + dow + '）', summaryBlocks);
+
+  // Post each store
+  records.forEach(function(r) {
+    var store = fv_(r, '店舗名');
+    var headerBlocks = buildStoreHeader_(r, dt, dow);
+    var res = dailySlackPost_(token, channel, '🏪 ' + store, headerBlocks);
+    if (res && res.ts) {
+      var detailBlocks = buildStoreDetail_(r);
+      dailySlackPost_(token, channel, '📝 ' + store + ' 詳細', detailBlocks, res.ts);
+    }
+  });
+
+  Logger.log('Daily report posted: ' + targetDate + ' (' + records.length + ' stores)');
+}
+
+function fv_(record, field) {
+  var f = record[field];
+  return (f && f.value) ? f.value : '';
+}
+
+function isEmptyContent_(text) {
+  if (!text) return true;
+  var lines = text.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].replace(/\s/g, '');
+    if (t && t !== '・') return false;
+  }
+  return true;
+}
+
+function cleanContent_(text) {
+  if (!text) return '';
+  var lines = text.split('\n');
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].replace(/^\s+|\s+$/g, '');
+    if (t && t !== '・') out.push(lines[i]);
+  }
+  var result = out.join('\n');
+  return result.length > 2800 ? result.substring(0, 2800) + '…' : result;
+}
+
+function fmtYen_(val) {
+  try { var n = parseInt(parseFloat(val)); return isNaN(n) ? '—' : '¥' + n.toLocaleString('en-US'); }
+  catch(e) { return '—'; }
+}
+
+function fmtPct_(val) {
+  try {
+    var pct = parseFloat(val);
+    if (isNaN(pct)) return '—';
+    var icon = pct >= 100 ? '✅' : (pct >= 90 ? '⚠️' : '🔻');
+    return pct.toFixed(1) + '% ' + icon;
+  } catch(e) { return '—'; }
+}
+
+function toInt_(val) {
+  try { var n = parseInt(parseFloat(val)); return isNaN(n) ? 0 : n; } catch(e) { return 0; }
+}
+
+function buildDailySummary_(records, dt, dow) {
+  var blocks = [
+    {type:'header', text:{type:'plain_text', text:'📋 日報報告  ' + (dt.getMonth()+1) + '/' + dt.getDate() + '（' + dow + '）', emoji:true}},
+    {type:'divider'}
+  ];
+  var totalSales = 0, totalTarget = 0, totalTx = 0;
+
+  records.forEach(function(r) {
+    var short = STORE_SHORT_[fv_(r,'店舗名')] || fv_(r,'店舗名');
+    var sales = toInt_(fv_(r,'売上')||'0');
+    var target = toInt_(fv_(r,'売上目標')||'0');
+    var tx = toInt_(fv_(r,'会計数')||'0');
+    var unit = toInt_(fv_(r,'客単価')||'0');
+    var pct = 0; try { pct = parseFloat(fv_(r,'目標達成率')||'0'); } catch(e) {}
+    totalSales += sales; totalTarget += target; totalTx += tx;
+    var icon = pct >= 100 ? '✅' : (pct >= 90 ? '⚠️' : '🔻');
+    blocks.push({type:'section', text:{type:'mrkdwn', text:
+      '*' + short + '*　' + icon + ' *' + pct.toFixed(1) + '%*\n'
+      + '　　💰 売上 *¥' + sales.toLocaleString('en-US') + '*　／　🎯 目標 *¥' + target.toLocaleString('en-US') + '*\n'
+      + '　　🧾 会計 *' + tx + '件*　／　💵 客単価 *¥' + unit.toLocaleString('en-US') + '*'
+    }});
+  });
+
+  var totalPct = totalTarget ? (totalSales / totalTarget * 100) : 0;
+  var avgUnit = totalTx ? Math.floor(totalSales / totalTx) : 0;
+  var totalIcon = totalPct >= 100 ? '✅' : (totalPct >= 90 ? '⚠️' : '🔻');
+  blocks.push({type:'divider'});
+  blocks.push({type:'section', text:{type:'mrkdwn', text:
+    '*📊 合計*　' + totalIcon + ' *' + totalPct.toFixed(1) + '%*\n'
+    + '　　💰 売上 *¥' + totalSales.toLocaleString('en-US') + '*　／　🎯 目標 *¥' + totalTarget.toLocaleString('en-US') + '*\n'
+    + '　　🧾 会計 *' + totalTx + '件*　／　💵 客単価 *¥' + avgUnit.toLocaleString('en-US') + '*'
+  }});
+  return blocks;
+}
+
+function buildStoreHeader_(record, dt, dow) {
+  var store = fv_(record, '店舗名');
+  var weather = WEATHER_EMOJI_[fv_(record, '天気１')] || '';
+  var staff = [fv_(record,'担当者名１'), fv_(record,'担当者名２'), fv_(record,'担当者３')].filter(function(s){return s;}).join(' / ');
+
+  var blocks = [
+    {type:'header', text:{type:'plain_text', text:'🏪 ' + store + '  ' + weather + '  ' + (dt.getMonth()+1) + '/' + dt.getDate() + '（' + dow + '）', emoji:true}},
+    {type:'section', fields:[
+      {type:'mrkdwn', text:'*💰 売上*\n' + fmtYen_(fv_(record,'売上'))},
+      {type:'mrkdwn', text:'*🎯 目標*\n' + fmtYen_(fv_(record,'売上目標'))},
+      {type:'mrkdwn', text:'*📈 達成率*\n' + fmtPct_(fv_(record,'目標達成率'))},
+      {type:'mrkdwn', text:'*🧾 会計数*\n' + fv_(record,'会計数') + '件'},
+      {type:'mrkdwn', text:'*💵 客単価*\n' + fmtYen_(fv_(record,'客単価'))},
+      {type:'mrkdwn', text:'*👤 担当*\n' + staff},
+    ]}
+  ];
+
+  var previews = [];
+  if (!isEmptyContent_(fv_(record,'在庫切れ'))) {
+    var l = cleanContent_(fv_(record,'在庫切れ')).split('\n')[0].substring(0,50);
+    previews.push('📦 在庫切れ: ' + l);
+  }
+  if (!isEmptyContent_(fv_(record,'その他共有事項'))) {
+    var l = cleanContent_(fv_(record,'その他共有事項')).split('\n')[0].substring(0,50);
+    previews.push('📝 共有: ' + l);
+  }
+  if (previews.length > 0) {
+    blocks.push({type:'context', elements:[{type:'mrkdwn', text:previews.join('　｜　')}]});
+  }
+  blocks.push({type:'context', elements:[{type:'mrkdwn', text:'↩️ 詳細はスレッドを確認'}]});
+  return blocks;
+}
+
+function buildStoreDetail_(record) {
+  var store = fv_(record, '店舗名');
+  var blocks = [{type:'header', text:{type:'plain_text', text:'📝 ' + store + ' - 詳細レポート', emoji:true}}];
+  var sections = [
+    ['📦','在庫切れ', fv_(record,'在庫切れ')],
+    ['📬','入荷予定', fv_(record,'入荷予定商品')],
+    ['📝','共有事項', fv_(record,'その他共有事項')],
+    ['👍','良かった接客', fv_(record,'良かった接客')],
+    ['💡','改善点', fv_(record,'悪かった接客')],
+    ['💬','お客様の声', fv_(record,'雑談')],
+    ['🧹','お店のために', fv_(record,'お店のためにしたこと')],
+  ];
+  sections.forEach(function(s) {
+    if (!isEmptyContent_(s[2])) {
+      blocks.push({type:'divider'});
+      blocks.push({type:'section', text:{type:'mrkdwn', text:'*' + s[0] + ' ' + s[1] + '*\n' + cleanContent_(s[2])}});
+    }
+  });
+  if (blocks.length === 1) {
+    blocks.push({type:'section', text:{type:'mrkdwn', text:'_（記入項目なし）_'}});
+  }
+  return blocks;
+}
+
+function dailySlackPost_(token, channel, text, blocks, threadTs) {
+  var body = {channel: channel, text: text, unfurl_links: false, unfurl_media: false};
+  if (blocks) body.blocks = blocks;
+  if (threadTs) body.thread_ts = threadTs;
+  try {
+    var resp = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {'Authorization': 'Bearer ' + token},
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true,
+    });
+    var result = JSON.parse(resp.getContentText());
+    if (!result.ok) Logger.log('Slack error: ' + result.error);
+    return result;
+  } catch(e) {
+    Logger.log('Slack failed: ' + e.message);
+    return null;
+  }
+}
+
+/**
+ * doGet web app endpoint - トリガーセットアップ等をHTTP経由で実行
+ * ?action=setupDailyReport or ?action=runDailyReport
+ */
+function doGet(e) {
+  var action = (e && e.parameter && e.parameter.action) || '';
+  var result = {};
+  try {
+    if (action === 'setupDailyReport') {
+      setupDailyReportTrigger();
+      result = {ok: true, message: 'Daily report trigger set: 11:00 JST'};
+    } else if (action === 'runDailyReport') {
+      postDailyReport();
+      result = {ok: true, message: 'Daily report posted'};
+    } else {
+      result = {ok: false, message: 'Unknown action: ' + action};
+    }
+  } catch(err) {
+    result = {ok: false, error: err.message};
+  }
+  return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * 日報タイムトリガーを設定する (毎日11:00 JST)
+ */
+function setupDailyReportTrigger() {
+  // 既存トリガー削除
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'postDailyReport') ScriptApp.deleteTrigger(t);
+  });
+  // 毎日11:00にpostDailyReportを実行
+  ScriptApp.newTrigger('postDailyReport')
+    .timeBased()
+    .atHour(11)
+    .everyDays(1)
+    .inTimezone('Asia/Tokyo')
+    .create();
+  Logger.log('Daily report trigger set: 11:00 JST daily');
 }
