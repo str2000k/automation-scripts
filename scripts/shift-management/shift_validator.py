@@ -95,23 +95,30 @@ def validate_schedule(schedule, staff, rules, dates, wishes=None):
             else:
                 consecutive = 0
 
-    # Rule 3: Weekly max work hours (8h/day)
+    # Rule 3: 正社員+固定シフトの月45時間残業上限 (週40時間 = 5日 基本)
+    # 役員・アルバイトは対象外（役員は自動生成対象外、アルバイトは希望シフトベース）
+    from collections import defaultdict
     for name, days in schedule.items():
         s = staff_by_name.get(name, {})
-        max_hours = float(s.get("最大労働時間/週", s.get("最大労働時間", "40")))
-        max_days_per_week = max_hours / 8
-
-        # Check each 7-day window
+        if s.get("雇用形態", "") != "正社員":
+            continue
+        if s.get("働き方", "") != "固定シフト":
+            continue
+        monthly_overtime = defaultdict(float)
         for week_start in range(0, len(days), 7):
             week_end = min(week_start + 7, len(days))
             week_days = days[week_start:week_end]
             work_count = sum(1 for d in week_days if d == "出勤")
-            if work_count > max_days_per_week:
-                week_label = dates[week_start] if week_start < len(dates) else f"Week{week_start // 7 + 1}"
+            overtime_hours = max(0, work_count * 8 - 40)
+            if overtime_hours > 0 and week_start < len(dates):
+                yearmonth = dates[week_start][:7]
+                monthly_overtime[yearmonth] += overtime_hours
+        for ym, total in monthly_overtime.items():
+            if total > 45:
                 violations.append({
-                    "rule": "週最大労働時間超過",
+                    "rule": "月残業上限超過",
                     "severity": "hard",
-                    "detail": f"{name}: {week_label}週 出勤{work_count}日 ({work_count * 8}h > {max_hours}h)",
+                    "detail": f"{name}: {ym} 残業{total:.0f}h > 45h",
                 })
 
     # Rule 4: Forced work days

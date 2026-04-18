@@ -1,0 +1,48 @@
+name: Shift Sync Staff Master (nightly)
+
+on:
+  schedule:
+    # 毎日 23:00 JST = 14:00 UTC
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-runモード'
+        type: boolean
+        default: true
+
+jobs:
+  sync-staff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Google credentials
+        run: |
+          mkdir -p ~/.google_workspace_mcp/chillaxy
+          cat > ~/.google_workspace_mcp/chillaxy/satoru@chillaxy.jp.json <<'EOF'
+          ${{ secrets.GOOGLE_CRED_JSON }}
+          EOF
+          chmod 600 ~/.google_workspace_mcp/chillaxy/satoru@chillaxy.jp.json
+
+      - name: Run sync_staff_master
+        working-directory: scripts/shift-management
+        env:
+          KINTONE_DOMAIN: ${{ secrets.KINTONE_DOMAIN }}
+          KINTONE_USERNAME: ${{ secrets.KINTONE_USERNAME }}
+          KINTONE_PASSWORD: ${{ secrets.KINTONE_PASSWORD }}
+          KINTONE_STAFF_MASTER_APP_ID: ${{ secrets.KINTONE_STAFF_MASTER_APP_ID }}
+          SHIFT_SPREADSHEET_ID: ${{ secrets.SHIFT_SPREADSHEET_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SHIFT_CHANNEL: ${{ secrets.SLACK_SHIFT_CHANNEL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python3 sync_staff_master.py
+          else
+            python3 sync_staff_master.py --no-dry-run
+          fi

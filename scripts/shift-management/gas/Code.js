@@ -617,7 +617,6 @@ function syncStaffMaster() {
         assigned_stores: { value: s['対応店舗'] },
         work_style: { value: s['働き方'] },
         position: { value: s['役職'] },
-        max_weekly_hours: { value: s['最大労働時間/週'] || '40' },
         active: { value: s['有効フラグ'] },
       };
       var rid = existMap[s['staff_id']];
@@ -985,11 +984,13 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
   var retailStores = stores.filter(function(s) { return s['種別'] === '店舗（営業）'; });
   var otherStores = stores.filter(function(s) { return s['種別'] !== '店舗（営業）'; });
 
+  // 役員は自動生成対象外
+  staff = staff.filter(function(s) { return s['雇用形態'] !== '役員'; });
+
   var staffInfo = staff.map(function(s) {
     return '- ' + s['氏名'] + ' (雇用:' + s['雇用形態'] + ', 働き方:' + s['働き方']
-      + ', 役職:' + s['役職'] + ', 週最大:' + (s['最大労働時間/週'] || '40') + 'h'
+      + ', 役職:' + s['役職']
       + ', 対応店舗:' + (s['対応店舗'] || '全店舗')
-      + (s['強制出勤日'] ? ', 強制出勤日:' + s['強制出勤日'] : '')
       + (s['個人ルール'] ? ', ルール:' + s['個人ルール'] : '') + ')';
   });
 
@@ -1044,8 +1045,8 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
     + '- 各店舗に毎日必ず早番1名/遅番1名を配置\n'
     + '- 同一人物が通し勤務する場合あり（例: 11:30-0:30）\n\n'
     + '## 制約\n'
-    + '1. 全スタッフ（固定シフト含む）を配置対象とする\n'
-    + '2. 各スタッフの週最大労働時間を超えないこと\n'
+    + '1. 役員を除く全スタッフ（正社員の固定シフト・アルバイトの希望シフト）を配置対象とする\n'
+    + '2. 正社員（固定シフト）は週40時間（週5日）が基本。最低人数が埋まらない日がある場合のみ残業可。ただし月の残業累計は45時間以内\n'
     + '3. 希望休（×マーク）は必ず尊重する\n'
     + '4. 対応店舗が指定されているスタッフはその店舗のみに配置\n'
     + '5. 最低週1日の休みを確保\n'

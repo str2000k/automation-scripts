@@ -1997,26 +1997,23 @@ function validateShiftResult_(result, staff, stores, wishes, dates) {
     }
   });
 
-  // Check 5 continued: 週最大労働時間 + 残業チェック
+  // Check 5 continued: 正社員・固定シフトのみ月45時間残業上限チェック (36協定)
+  // 役員は自動生成対象外、アルバイトは希望シフトベース
   var monthlyOvertime = {}; // { name: total overtime hours }
 
   for (var name in weeklyHours) {
     var info = staffMap[name];
     if (!info) continue;
-    var maxHours = parseInt(info['最大労働時間/週'] || '40') || 40;
+    if (info['雇用形態'] !== '正社員') continue;
+    if (info['働き方'] !== '固定シフト') continue;
     var weeks = weeklyHours[name];
     for (var weekKey in weeks) {
-      if (weeks[weekKey] > maxHours) {
-        errors.push(name + ': 週' + weekKey + '〜の労働時間が' + Math.round(weeks[weekKey] * 10) / 10 + 'h (上限' + maxHours + 'h)');
-      }
-      // 週40時間超過分を残業として集計
       var overtime = Math.max(0, weeks[weekKey] - 40);
       if (!monthlyOvertime[name]) monthlyOvertime[name] = 0;
       monthlyOvertime[name] += overtime;
     }
   }
 
-  // 月45時間超の残業チェック (36協定上限)
   for (var name in monthlyOvertime) {
     if (monthlyOvertime[name] > 45) {
       errors.push(name + ': 月の時間外労働が' + Math.round(monthlyOvertime[name] * 10) / 10 + 'h (36協定上限45h超過)');
@@ -2202,11 +2199,13 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
   var retailStores = stores.filter(function(s) { return s['種別'] === '店舗（営業）'; });
   var otherStores = stores.filter(function(s) { return s['種別'] !== '店舗（営業）'; });
 
+  // 役員は自動生成対象外
+  staff = staff.filter(function(s) { return s['雇用形態'] !== '役員'; });
+
   var staffInfo = staff.map(function(s) {
     return '- ' + s['氏名'] + ' (雇用:' + s['雇用形態'] + ', 働き方:' + s['働き方']
-      + ', 役職:' + s['役職'] + ', 週最大:' + (s['最大労働時間/週'] || '40') + 'h'
+      + ', 役職:' + s['役職']
       + ', 対応店舗:' + (s['対応店舗'] || '全店舗')
-      + (s['強制出勤日'] ? ', 強制出勤日:' + s['強制出勤日'] : '')
       + (s['個人ルール'] ? ', ルール:' + s['個人ルール'] : '') + ')';
   });
 
@@ -2277,8 +2276,8 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
     + '- コスト最適化: 残業を最小限にするシフトが望ましい。1日8時間以内×週5日が理想\n'
     + '- 残業が発生する場合は特定のスタッフに偏らないよう均等に分散\n\n'
     + '## 制約\n'
-    + '1. 全スタッフ（固定シフト含む）を配置対象とする\n'
-    + '2. 各スタッフの週最大労働時間を超えないこと\n'
+    + '1. 役員を除く全スタッフ（正社員の固定シフト・アルバイトの希望シフト）を配置対象とする\n'
+    + '2. 正社員（固定シフト）は週40時間（週5日）が基本。最低人数が埋まらない日がある場合のみ残業可。ただし月の残業累計は45時間以内\n'
     + '3. 希望休（×マーク）は必ず尊重する\n'
     + '4. 対応店舗が指定されているスタッフはその店舗のみに配置\n'
     + '5. 最低週1日の休みを確保\n'

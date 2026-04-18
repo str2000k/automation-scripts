@@ -32,7 +32,6 @@ FIELD_MAP = {
     "雇用形態": "employment_type",
     "働き方": "shift_type",
     "役職": "position",
-    "最大労働時間/週": "max_hours_per_week",
     "個人ルール": "personal_rule",
     "Slack ID": "slack_id",
     "LINE UID": "line_uid",
@@ -239,11 +238,6 @@ def build_kintone_record(sheet_row):
     record = {}
     for sheet_field, kintone_field in FIELD_MAP.items():
         value = sheet_row.get(sheet_field, "")
-        if kintone_field == "max_hours_per_week" and value:
-            try:
-                value = str(int(float(value)))
-            except (ValueError, TypeError):
-                value = ""
         record[kintone_field] = {"value": value}
     # Set synced_at
     record["synced_at"] = {"value": datetime.now(tz=__import__('datetime').timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -256,15 +250,7 @@ def diff_records(sheet_record, kintone_record):
     for sheet_field, kintone_field in FIELD_MAP.items():
         sheet_val = str(sheet_record.get(sheet_field, "")).strip()
         kintone_val = str(kintone_record.get(kintone_field, {}).get("value", "")).strip()
-        if kintone_field == "max_hours_per_week":
-            # Normalize numeric comparison
-            try:
-                if float(sheet_val or "0") != float(kintone_val or "0"):
-                    changed.append(kintone_field)
-            except ValueError:
-                if sheet_val != kintone_val:
-                    changed.append(kintone_field)
-        elif sheet_val != kintone_val:
+        if sheet_val != kintone_val:
             changed.append(kintone_field)
     return changed
 

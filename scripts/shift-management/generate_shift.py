@@ -485,21 +485,19 @@ def build_claude_prompt(staff, rules, stores, wishes, dates):
     retail_stores = [s for s in stores if s.get("種別") == "店舗（営業）"]
     other_stores = [s for s in stores if s.get("種別") != "店舗（営業）"]
 
-    # Staff info
+    # Staff info (役員は自動生成対象外のため除外)
+    staff = [s for s in staff if s.get("雇用形態", "") != "役員"]
     staff_info = []
     for s in staff:
         name = s.get("氏名", "")
         emp_type = s.get("雇用形態", "")
         shift_type = s.get("働き方", "")
-        max_hours = s.get("最大労働時間/週", "40")
-        forced = s.get("強制出勤日", "")
         store = s.get("対応店舗", "")
         position = s.get("役職", "")
         personal_rule = s.get("個人ルール", "")
         staff_info.append(
             f"- {name} (雇用:{emp_type}, 働き方:{shift_type}, 役職:{position}, "
-            f"週最大:{max_hours or '40'}h, 対応店舗:{store or '全店舗'}, "
-            f"強制出勤日:{forced or 'なし'}"
+            f"対応店舗:{store or '全店舗'}"
             f"{', ルール:' + personal_rule if personal_rule else ''})"
         )
 
@@ -576,8 +574,8 @@ def build_claude_prompt(staff, rules, stores, wishes, dates):
 - 同一人物が通し勤務する場合あり（例: 11:30-0:30）
 
 ## 制約
-1. 全スタッフ（固定シフト含む）を配置対象とする
-2. 各スタッフの週最大労働時間を超えないこと
+1. 役員を除く全スタッフ（正社員の固定シフト・アルバイトの希望シフト）を配置対象とする
+2. 正社員（固定シフト）は週40時間（週5日）が基本。最低人数が埋まらない日がある場合のみ残業可。ただし月の残業累計は45時間以内
 3. 希望休（×マーク）は必ず尊重する
 4. 対応店舗が指定されているスタッフはその店舗のみに配置
 5. 最低週1日の休みを確保

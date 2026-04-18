@@ -1,0 +1,52 @@
+name: Shift Init Requests (monthly)
+
+on:
+  schedule:
+    # 毎月1日 9:00 JST = 毎月1日 0:00 UTC
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      period_start:
+        description: '対象期間開始 YYYY-MM-DD (空欄で翌月1日)'
+        required: false
+      period_end:
+        description: '対象期間終了 YYYY-MM-DD (空欄で翌月14日)'
+        required: false
+      dry_run:
+        description: 'dry-runモード'
+        type: boolean
+        default: true
+
+jobs:
+  init-requests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run init_shift_requests
+        working-directory: scripts/shift-management
+        env:
+          KINTONE_DOMAIN: ${{ secrets.KINTONE_DOMAIN }}
+          KINTONE_USERNAME: ${{ secrets.KINTONE_USERNAME }}
+          KINTONE_PASSWORD: ${{ secrets.KINTONE_PASSWORD }}
+          KINTONE_SHIFT_WISH_APP_ID: ${{ secrets.KINTONE_SHIFT_WISH_APP_ID }}
+          KINTONE_STAFF_MASTER_APP_ID: ${{ secrets.KINTONE_STAFF_MASTER_APP_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SHIFT_CHANNEL: ${{ secrets.SLACK_SHIFT_CHANNEL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.period_start }}" ]; then
+            ARGS="$ARGS --period-start ${{ inputs.period_start }}"
+          fi
+          if [ -n "${{ inputs.period_end }}" ]; then
+            ARGS="$ARGS --period-end ${{ inputs.period_end }}"
+          fi
+          if [ "${{ inputs.dry_run }}" != "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            ARGS="$ARGS --no-dry-run"
+          fi
+          python3 init_shift_requests.py $ARGS

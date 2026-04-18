@@ -4,3 +4,5 @@ __pycache__/
 .claude/
 *.log
 sync_outbox.json
+*.bak-*
+*_backup_*.json

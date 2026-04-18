@@ -1,0 +1,44 @@
+name: Shift Reminder (daily)
+
+on:
+  schedule:
+    # 毎日 9:00 JST = 0:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '何日前に通知するか (デフォルト 3)'
+        required: false
+        default: '3'
+      dry_run:
+        description: 'dry-runモード'
+        type: boolean
+        default: true
+
+jobs:
+  reminder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run reminder
+        working-directory: scripts/shift-management
+        env:
+          KINTONE_DOMAIN: ${{ secrets.KINTONE_DOMAIN }}
+          KINTONE_USERNAME: ${{ secrets.KINTONE_USERNAME }}
+          KINTONE_PASSWORD: ${{ secrets.KINTONE_PASSWORD }}
+          KINTONE_SHIFT_CONFIRMED_APP_ID: ${{ secrets.KINTONE_SHIFT_CONFIRMED_APP_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SHIFT_CHANNEL: ${{ secrets.SLACK_SHIFT_CHANNEL }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: |
+          ARGS="--days ${{ inputs.days || '3' }}"
+          if [ "${{ inputs.dry_run }}" != "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            ARGS="$ARGS --no-dry-run"
+          fi
+          python3 reminder.py $ARGS
