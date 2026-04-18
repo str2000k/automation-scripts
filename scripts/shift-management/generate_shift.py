@@ -482,8 +482,8 @@ def day_label(date_str):
 def build_claude_prompt(staff, rules, stores, wishes, dates):
     """Build prompt for Claude to generate store-assigned shift schedule."""
 
-    retail_stores = [s for s in stores if s.get("種別") == "店舗（営業）"]
-    other_stores = [s for s in stores if s.get("種別") != "店舗（営業）"]
+    retail_stores = [s for s in stores if s.get("種別") == "営業"]
+    other_stores = [s for s in stores if s.get("種別") != "営業"]
 
     # Staff info (役員は自動生成対象外のため除外)
     staff = [s for s in staff if s.get("雇用形態", "") != "役員"]
@@ -739,8 +739,8 @@ def _build_column_layout(stores, staff_groups):
         store_headers: list for the store header row
         sub_headers: list for the sub-header row
     """
-    retail_stores = [s for s in stores if s.get("種別") == "店舗（営業）"]
-    other_stores = [s for s in stores if s.get("種別") != "店舗（営業）"]
+    retail_stores = [s for s in stores if s.get("種別") == "営業"]
+    other_stores = [s for s in stores if s.get("種別") != "営業"]
 
     columns = []
     store_headers = []
