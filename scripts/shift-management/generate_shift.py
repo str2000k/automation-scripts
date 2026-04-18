@@ -531,7 +531,7 @@ def build_claude_prompt(staff, rules, stores, wishes, dates):
             f"- {s['店舗名']}: 営業店舗、早番・遅番の2人体制、最低{s.get('最低必要人数/日', '2')}人/日"
         )
     for s in other_stores:
-        store_info.append(f"- {s['店舗名']}: {s.get('種別', '')}")
+        store_info.append(f"- {s['店舗名']}: {s.get('種別', '')}、最低{s.get('最低必要人数/日', '1')}人/日")
 
     rules_text = "\n".join(f"- {r}" for r in rules) if rules else "なし"
     date_labels = [f"{d}({day_label(d)})" for d in dates]
@@ -711,7 +711,7 @@ def call_claude_for_shift(staff, rules, stores, wishes, dates):
 
         # Convert to legacy format for validation
         legacy_schedule = _convert_to_legacy_schedule(result, staff, dates)
-        violations = validate_schedule(legacy_schedule, staff, rules, dates, wishes_flat)
+        violations = validate_schedule(legacy_schedule, staff, rules, dates, wishes_flat, ai_result=result, stores=stores)
         print(f"  Validation: {format_violations(violations)}")
 
         if not has_hard_violations(violations):

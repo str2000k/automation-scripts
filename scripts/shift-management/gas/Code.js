@@ -1933,6 +1933,24 @@ function validateShiftResult_(result, staff, stores, wishes, dates) {
       if (!assign['遅番']) errors.push(dateStr + ': ' + storeName + 'の遅番が未配置');
     });
 
+    // Check 2.5: 店舗マスタ「最低必要人数/日」による店舗別人員チェック
+    stores.forEach(function(s) {
+      var storeName = s['店舗名'];
+      if (!storeName) return;
+      var minReq = parseInt(s['最低必要人数/日'] || '0', 10) || 0;
+      if (minReq <= 0) return;
+      var assign = storeAssigns[storeName];
+      var count = 0;
+      if (Array.isArray(assign)) {
+        count = assign.filter(function(n) { return n; }).length;
+      } else if (assign && typeof assign === 'object') {
+        for (var k in assign) { if (assign[k]) count++; }
+      }
+      if (count < minReq) {
+        errors.push(dateStr + ' ' + storeName + ': 配置' + count + '人 (最低' + minReq + '人必要)');
+      }
+    });
+
     // Check 3: 希望休が尊重されているか
     var allAssigned = {};
     for (var sn in storeAssigns) {
@@ -2234,7 +2252,7 @@ function buildClaudePrompt_(staff, stores, rules, wishes, dates) {
     storeInfo.push('- ' + s['店舗名'] + ': 営業店舗、早番/遅番の2人体制、最低' + (s['最低必要人数/日'] || '2') + '人/日');
   });
   otherStores.forEach(function(s) {
-    storeInfo.push('- ' + s['店舗名'] + ': ' + s['種別']);
+    storeInfo.push('- ' + s['店舗名'] + ': ' + s['種別'] + '、最低' + (s['最低必要人数/日'] || '1') + '人/日');
   });
 
   var rulesText = rules.length ? rules.map(function(r) { return '- ' + r; }).join('\n') : 'なし';

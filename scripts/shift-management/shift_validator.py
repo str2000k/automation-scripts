@@ -42,7 +42,7 @@ def _extract_rule_value(rules, pattern, default):
     return default
 
 
-def validate_schedule(schedule, staff, rules, dates, wishes=None):
+def validate_schedule(schedule, staff, rules, dates, wishes=None, ai_result=None, stores=None):
     """Validate a shift schedule against hard rules.
 
     Args:
@@ -52,30 +52,64 @@ def validate_schedule(schedule, staff, rules, dates, wishes=None):
         rules: list of rule strings (or legacy dict)
         dates: list of date strings (YYYY-MM-DD)
         wishes: list of wish dicts (optional)
+        ai_result: AI生成結果のJSON dict（店舗別人員配置を含む、店舗別チェック用）
+        stores: 店舗マスタのdict list（最低必要人数/日を含む、店舗別チェック用）
 
     Returns:
         list of violation dicts: {"rule", "severity", "detail"}
         severity: "hard" (must fix) or "soft" (warning)
     """
     violations = []
-    min_staff = _extract_rule_value(rules, r"最低.*人", 3)
     max_consecutive = _extract_rule_value(rules, r"連続", 5)
 
     # Build staff lookup
     staff_by_name = {s.get("氏名", ""): s for s in staff}
 
-    # Rule 1: Minimum staff per day
-    for i, date in enumerate(dates):
-        count = 0
-        for name, days in schedule.items():
-            if i < len(days) and days[i] == "出勤":
-                count += 1
-        if count < min_staff:
-            violations.append({
-                "rule": "最低必須人数",
-                "severity": "hard",
-                "detail": f"{date}: 出勤{count}人 (最低{min_staff}人必要)",
-            })
+    # Rule 1: 店舗別の最低必要人数チェック（店舗マスタの「最低必要人数/日」を使用）
+    # ai_result と stores が両方渡された時のみ実施。渡されない場合は全体合算フォールバック
+    if ai_result and stores:
+        store_min_map = {}
+        for s in stores:
+            name = s.get("店舗名", "")
+            try:
+                min_req = int(float(str(s.get("最低必要人数/日", "0")).strip() or "0"))
+            except (ValueError, TypeError):
+                min_req = 0
+            if name and min_req > 0:
+                store_min_map[name] = min_req
+        for day in ai_result.get("schedule", []):
+            date = day.get("date", "")
+            stores_assign = day.get("stores", {})
+            for store_name, assignments in stores_assign.items():
+                min_req = store_min_map.get(store_name, 0)
+                if min_req == 0:
+                    continue
+                if isinstance(assignments, dict):
+                    count = sum(1 for v in assignments.values() if v)
+                elif isinstance(assignments, list):
+                    count = sum(1 for v in assignments if v)
+                else:
+                    count = 0
+                if count < min_req:
+                    violations.append({
+                        "rule": "店舗別最低人数不足",
+                        "severity": "hard",
+                        "detail": f"{date} {store_name}: {count}人 (最低{min_req}人必要)",
+                    })
+    else:
+        # フォールバック: 全体合算の最低人数チェック（共通ルールマスタ "最低*人" 参照、デフォルト3）
+        min_staff = _extract_rule_value(rules, r"最低.*人", 3)
+        for i, date in enumerate(dates):
+            count = 0
+            for name, days in schedule.items():
+                if i < len(days) and days[i] == "出勤":
+                    count += 1
+            if count < min_staff:
+                violations.append({
+                    "rule": "最低必須人数",
+                    "severity": "hard",
+                    "detail": f"{date}: 出勤{count}人 (最低{min_staff}人必要)",
+                })
 
     # Rule 2: Maximum consecutive work days
     for name, days in schedule.items():
