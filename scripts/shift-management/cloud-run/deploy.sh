@@ -37,12 +37,26 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     exit 1
 fi
 
-# Source .env (simple key=value parser)
+# Source .env (quote-safe parser: preserves values with '"' characters)
 set -a
-while IFS='=' read -r key val; do
-    key=$(echo "$key" | xargs)
-    [[ -z "$key" || "$key" == \#* ]] && continue
-    val=$(echo "$val" | xargs)
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # trim leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" != *=* ]] && continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    # trim only trailing whitespace of key
+    key="${key%"${key##*[![:space:]]}"}"
+    # strip surrounding single or double quotes from val if present
+    if [[ "$val" == \"*\" && "$val" == *\" ]]; then
+        val="${val#\"}"
+        val="${val%\"}"
+    elif [[ "$val" == \'*\' && "$val" == *\' ]]; then
+        val="${val#\'}"
+        val="${val%\'}"
+    fi
     export "$key"="$val"
 done < "${ENV_FILE}"
 set +a

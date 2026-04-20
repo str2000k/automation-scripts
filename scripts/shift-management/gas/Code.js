@@ -86,7 +86,44 @@ function onOpen() {
     .addItem('② 希望シフト取得', 'fetchWishData')
     .addItem('③ AIシフト生成', 'generateShift')
     .addItem('④ 確定シフト反映', 'syncConfirmedShift')
+    .addSeparator()
+    .addItem('⑤ 月データ読込 (年月セレクター連動)', 'loadMonthData')
+    .addItem('⑥ トリガー設定', 'setupTrigger')
+    .addItem('⑦ 設定状態デバッグ', 'debugProperties')
     .addToUi();
+}
+
+function debugProperties() {
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var keys = ['KINTONE_DOMAIN','KINTONE_USERNAME','KINTONE_PASSWORD','ANTHROPIC_API_KEY','SLACK_BOT_TOKEN','SLACK_SHIFT_CHANNEL','SHIFT_CALENDAR_ID'];
+  var lines = [];
+  keys.forEach(function(k) {
+    var v = props[k];
+    var isSecret = (k.indexOf('PASSWORD') >= 0 || k.indexOf('TOKEN') >= 0 || k.indexOf('API_KEY') >= 0);
+    if (isSecret) {
+      lines.push(k + ': ' + (v ? '[SET, len=' + v.length + ']' : '[EMPTY]'));
+    } else {
+      lines.push(k + ': ' + (v || '[EMPTY]'));
+    }
+  });
+  // Test kintone fetch
+  var kintoneTest = '[未実行]';
+  try {
+    var domain = getProp_('KINTONE_DOMAIN');
+    var u = getProp_('KINTONE_USERNAME');
+    var p = getProp_('KINTONE_PASSWORD');
+    if (!domain || !u || !p) {
+      kintoneTest = '[認証情報不足でスキップ]';
+    } else {
+      var url = 'https://' + domain + '/k/v1/records.json?app=212&query=' + encodeURIComponent('limit 1');
+      var auth = kintoneAuth_();
+      var resp = UrlFetchApp.fetch(url, {headers: {'X-Cybozu-Authorization': auth}, muteHttpExceptions: true});
+      kintoneTest = 'HTTP ' + resp.getResponseCode() + ' / body先頭: ' + resp.getContentText().substring(0, 120);
+    }
+  } catch (e) {
+    kintoneTest = 'ERROR: ' + e.message;
+  }
+  SpreadsheetApp.getUi().alert('--- Script Properties ---\n' + lines.join('\n') + '\n\n--- kintone 212 接続テスト ---\n' + kintoneTest);
 }
 
 // ==========================================================================
@@ -1227,8 +1264,7 @@ function sendShiftCollectionDMs_(staff, periodStart, periodEnd, deadline) {
             block_id: 'actions_' + dateStr,
             elements: [
               { type: 'button', text: { type: 'plain_text', text: '✅ 出勤' }, style: 'primary', value: staffId, action_id: 'shift_' + dateStr + '_出勤' },
-              { type: 'button', text: { type: 'plain_text', text: '😴 休み' }, value: staffId, action_id: 'shift_' + dateStr + '_休み' },
-              { type: 'button', text: { type: 'plain_text', text: '🙏 希望休' }, style: 'danger', value: staffId, action_id: 'shift_' + dateStr + '_希望休' },
+              { type: 'button', text: { type: 'plain_text', text: '🙏 休み希望' }, style: 'danger', value: staffId, action_id: 'shift_' + dateStr + '_希望休' },
             ],
           });
         });

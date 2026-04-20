@@ -274,13 +274,7 @@ def build_initial_buttons(date_str: str, staff_id: str) -> list:
             },
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "😴 休み"},
-                "value": staff_id,
-                "action_id": f"shift_{date_str}_休み",
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "🙏 希望休"},
+                "text": {"type": "plain_text", "text": "🙏 休み希望"},
                 "style": "danger",
                 "value": staff_id,
                 "action_id": f"shift_{date_str}_希望休",

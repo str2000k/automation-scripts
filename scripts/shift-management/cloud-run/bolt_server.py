@@ -1,78 +1,54 @@
 #!/usr/bin/env python3
 """
-bolt_server.py (Cloud Run HTTP mode)
+bolt_server.py
 
-Slack Bolt server for shift button interactions.
-Runs in HTTP mode for Cloud Run deployment (no Socket Mode / WebSocket).
+Slack Bolt server for shift button interactions (Socket Mode).
+Receives button taps from staff and updates kintone ID=211.
 
-Environment variables required:
-  SLACK_BOT_TOKEN          - Bot User OAuth Token (xoxb-...)
-  SLACK_SIGNING_SECRET     - Slack app signing secret
-  KINTONE_DOMAIN           - e.g. ny76p.cybozu.com
-  KINTONE_USERNAME         - kintone login user
-  KINTONE_PASSWORD         - kintone login password
-  KINTONE_SHIFT_WISH_APP_ID - kintone app ID for shift wishes (211)
-  PORT                     - HTTP port (Cloud Run sets this, default 8080)
+Two-step flow for 出勤:
+  Step 1: [出勤] [休み] [希望休]
+  Step 2: [フル 10-19] [早番 10-15] [遅番 14-19] [戻る]
+
+No public URL required - uses WebSocket via Socket Mode.
+
+Usage:
+  python3 bolt_server.py
 """
 
 import base64
-import calendar
 import datetime
 import json
 import logging
 import os
 import re
+import sys
 import urllib.parse
 import urllib.request
 
 from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+from config import (
+    SLACK_BOT_TOKEN,
+    SLACK_APP_TOKEN,
+    BOLT_PORT,
+    KINTONE_DOMAIN,
+    KINTONE_USERNAME,
+    KINTONE_PASSWORD,
+    KINTONE_SHIFT_WISH_APP_ID,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration from environment variables
-# ---------------------------------------------------------------------------
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
-SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
-KINTONE_DOMAIN = os.environ.get("KINTONE_DOMAIN", "ny76p.cybozu.com")
-KINTONE_USERNAME = os.environ.get("KINTONE_USERNAME", "")
-KINTONE_PASSWORD = os.environ.get("KINTONE_PASSWORD", "")
-KINTONE_SHIFT_WISH_APP_ID = int(os.environ.get("KINTONE_SHIFT_WISH_APP_ID", "211"))
-PORT = int(os.environ.get("PORT", "8080"))
+# Bolt app (Socket Mode)
+bolt_app = App(token=SLACK_BOT_TOKEN)
 
 SHIFT_CHANNEL = "C0AKBJ1LTV2"  # #shift-management
 
-# ---------------------------------------------------------------------------
-# Bolt app (HTTP mode with signing secret verification)
-# ---------------------------------------------------------------------------
-bolt_app = App(
-    token=SLACK_BOT_TOKEN,
-    signing_secret=SLACK_SIGNING_SECRET,
-)
-
-
-# ---------------------------------------------------------------------------
-# Health check (Cloud Run requires responding to HTTP GET /)
-# ---------------------------------------------------------------------------
-from flask import Flask, request, make_response
-
-flask_app = Flask(__name__)
-
-
-@flask_app.route("/health", methods=["GET"])
-def health():
-    return make_response("ok", 200)
-
-
-@flask_app.route("/", methods=["GET"])
-def root():
-    return make_response("Shift Bolt Server (Cloud Run)", 200)
-
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # kintone helpers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 def _kintone_headers():
     credential = base64.b64encode(
@@ -147,12 +123,13 @@ def upsert_kintone_shift(staff_id: str, shift_date: str, shift_status: str,
         # Create new
         record_fields["staff_id"] = {"value": staff_id}
         record_fields["shift_date"] = {"value": shift_date}
-        # Compute period: 1-15 -> period=1-15, 16-end -> period=16-end
+        # Compute period: 1-15日 → period=当月1-15, 16-末日 → period=当月16-末日
         d = datetime.date.fromisoformat(shift_date)
         if d.day <= 15:
             p_start = d.replace(day=1).isoformat()
             p_end = d.replace(day=15).isoformat()
         else:
+            import calendar
             p_start = d.replace(day=16).isoformat()
             last_day = calendar.monthrange(d.year, d.month)[1]
             p_end = d.replace(day=last_day).isoformat()
@@ -185,9 +162,9 @@ def upsert_kintone_shift(staff_id: str, shift_date: str, shift_status: str,
     return True
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Block builders
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 def _weekday_str(date_str: str) -> str:
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
@@ -197,7 +174,7 @@ def _weekday_str(date_str: str) -> str:
 
 def build_confirmed_blocks(date_str: str, staff_id: str, shift_status: str,
                             start_time: str = "", end_time: str = "") -> list:
-    """Return blocks showing the selected status + edit button."""
+    """Return blocks showing the selected status + 修正 button."""
     weekday = _weekday_str(date_str)
     emoji = {"出勤": "✅", "休み": "😴", "希望休": "🙏"}.get(shift_status, "")
     time_info = f"（{start_time}〜{end_time}）" if start_time else ""
@@ -239,7 +216,7 @@ def _time_options_block(action_id, label, initial="10:00"):
 
 
 def build_time_select_blocks(date_str: str, staff_id: str) -> list:
-    """Return blocks for time selection (step 2 after work tap)."""
+    """Return blocks for time selection (step 2 after 出勤 tap)."""
     weekday = _weekday_str(date_str)
     section = {
         "type": "section",
@@ -297,13 +274,7 @@ def build_initial_buttons(date_str: str, staff_id: str) -> list:
             },
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "😴 休み"},
-                "value": staff_id,
-                "action_id": f"shift_{date_str}_休み",
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "🙏 希望休"},
+                "text": {"type": "plain_text", "text": "🙏 休み希望"},
                 "style": "danger",
                 "value": staff_id,
                 "action_id": f"shift_{date_str}_希望休",
@@ -314,7 +285,12 @@ def build_initial_buttons(date_str: str, staff_id: str) -> list:
 
 
 def replace_date_blocks(original_blocks, shift_date, new_blocks_for_date):
-    """Replace the section(+actions) blocks for a specific date with new blocks."""
+    """Replace the section(+actions) blocks for a specific date with new blocks.
+
+    Handles both states:
+    - section + actions (initial / time-select): replaces both
+    - section only with accessory (confirmed): replaces just the section
+    """
     result = []
     skip_next_actions = False
 
@@ -325,6 +301,7 @@ def replace_date_blocks(original_blocks, shift_date, new_blocks_for_date):
             if block.get("type") == "actions" and block_id == f"actions_{shift_date}":
                 skip_next_actions = False
                 continue
+            # No actions block follows (confirmed state) — stop skipping
             skip_next_actions = False
 
         if block_id == f"shift_{shift_date}":
@@ -346,69 +323,9 @@ def update_message(client, body, new_blocks, fallback_text):
     )
 
 
-# ---------------------------------------------------------------------------
-# Fixed-shift staff helpers (inlined from slack_shift_bot.py)
-# ---------------------------------------------------------------------------
-
-def build_fixed_shift_blocks(staff_id, staff_name, period_start, period_end, deadline):
-    """Build Block Kit blocks for fixed-shift staff to request days off."""
-    count_options = [
-        {"text": {"type": "plain_text", "text": f"{n}日"}, "value": str(n)}
-        for n in range(1, 9)
-    ]
-
-    blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "📅 希望休の入力"},
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*対象期間:*\n{period_start} 〜 {period_end}"},
-                {"type": "mrkdwn", "text": f"*回答期限:*\n{deadline}"},
-            ],
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "希望休がある場合は日数を選んで日付を入力してください。\n希望休がない場合は「希望休なし」を押してください。",
-            },
-        },
-        {
-            "type": "actions",
-            "block_id": "fixed_actions",
-            "elements": [
-                {
-                    "type": "static_select",
-                    "action_id": "fixedcount",
-                    "placeholder": {"type": "plain_text", "text": "希望休の日数"},
-                    "options": count_options,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "希望休なし"},
-                    "value": f"{staff_id}|{period_start}|{period_end}",
-                    "action_id": "fixednone",
-                },
-            ],
-        },
-        {"type": "divider"},
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"kintoneでも入力できます: <https://{KINTONE_DOMAIN}/k/{KINTONE_SHIFT_WISH_APP_ID}/|シフト希望収集アプリ>"},
-            ],
-        },
-    ]
-    return blocks
-
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Bolt action handlers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 # Step 1: shift_YYYY-MM-DD_出勤 / 休み / 希望休
 @bolt_app.action(re.compile(r"^shift_\d{4}-\d{2}-\d{2}_.+$"))
@@ -462,10 +379,10 @@ def handle_shift_action(ack, body, client, logger):
                    f"シフト希望入力（{shift_date}: {shift_status}）")
 
 
-# Step 2: confirm_YYYY-MM-DD
+# Step 2: confirm_YYYY-MM-DD — read timepicker values and save
 @bolt_app.action(re.compile(r"^confirm_\d{4}-\d{2}-\d{2}$"))
 def handle_confirm_action(ack, body, client, logger):
-    """Handle confirm button -- read selected start/end times from state."""
+    """Handle 確定 button — read selected start/end times from state."""
     ack()
 
     action = body["actions"][0]
@@ -504,17 +421,17 @@ def handle_confirm_action(ack, body, client, logger):
                    f"シフト希望入力（{shift_date}: 出勤 {start_time}-{end_time}）")
 
 
-# Time select change events -- just ack
+# Time select change events — just ack, value is read on confirm
 @bolt_app.action(re.compile(r"^(start|end)_\d{4}-\d{2}-\d{2}$"))
 def handle_time_select_change(ack, body, logger):
     """Ack time dropdown changes (state is read on confirm)."""
     ack()
 
 
-# Edit button: return to initial buttons from confirmed state
+# Edit button: return to initial [出勤] [休み] [希望休] from confirmed state
 @bolt_app.action(re.compile(r"^edit_\d{4}-\d{2}-\d{2}$"))
 def handle_edit_action(ack, body, client, logger):
-    """Handle edit button to return to step 1 from confirmed state."""
+    """Handle 修正 button to return to step 1 from confirmed state."""
     ack()
 
     action = body["actions"][0]
@@ -529,10 +446,10 @@ def handle_edit_action(ack, body, client, logger):
     update_message(client, body, new_blocks, "シフト希望入力")
 
 
-# Back button: return to initial buttons
+# Back button: return to initial [出勤] [休み] [希望休]
 @bolt_app.action(re.compile(r"^back_\d{4}-\d{2}-\d{2}$"))
 def handle_back_action(ack, body, client, logger):
-    """Handle back button to return to step 1."""
+    """Handle 戻る button to return to step 1."""
     ack()
 
     action = body["actions"][0]
@@ -548,9 +465,9 @@ def handle_back_action(ack, body, client, logger):
     update_message(client, body, new_blocks, "シフト希望入力")
 
 
-# ---------------------------------------------------------------------------
-# Fixed-shift staff: day-off input handlers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# Fixed-shift staff: 希望休 input handlers
+# -----------------------------------------------------------------------
 
 def _parse_fixed_value(value_str):
     """Parse 'S001|2026-03-16|2026-03-29' from button value."""
@@ -573,6 +490,7 @@ def build_datepicker_blocks(count, staff_id, period_start, period_end):
         },
     ]
 
+    # Group datepickers into actions blocks (max 5 elements per block)
     pickers = []
     for i in range(1, count + 1):
         pickers.append({
@@ -581,6 +499,7 @@ def build_datepicker_blocks(count, staff_id, period_start, period_end):
             "placeholder": {"type": "plain_text", "text": f"{i}日目"},
         })
 
+    # Chunk into groups of 4 (leave room for buttons in last group)
     chunk_size = 4
     for idx in range(0, len(pickers), chunk_size):
         chunk = pickers[idx:idx + chunk_size]
@@ -590,6 +509,7 @@ def build_datepicker_blocks(count, staff_id, period_start, period_end):
             "elements": chunk,
         })
 
+    # Submit + back buttons
     blocks.append({
         "type": "actions",
         "block_id": "fixed_submit_actions",
@@ -614,7 +534,7 @@ def build_datepicker_blocks(count, staff_id, period_start, period_end):
 
 
 def build_fixed_confirmed_blocks(staff_id, dates, period_start, period_end):
-    """Build confirmed blocks for fixed-shift day-off."""
+    """Build confirmed blocks for fixed-shift 希望休."""
     if dates:
         date_list = "、".join(dates)
         text = f"✅ *希望休 {len(dates)}日* を登録しました。\n{date_list}"
@@ -638,6 +558,7 @@ def build_fixed_confirmed_blocks(staff_id, dates, period_start, period_end):
 
 def rebuild_fixed_initial(staff_id, period_start, period_end, deadline):
     """Rebuild the initial fixed-shift message blocks."""
+    from slack_shift_bot import build_fixed_shift_blocks
     return build_fixed_shift_blocks(staff_id, "", period_start, period_end, deadline)
 
 
@@ -663,6 +584,7 @@ def replace_all_content_blocks(original_blocks, new_content):
             footer_blocks.append(block)
             continue
 
+    # If we couldn't parse, just use new content
     if not header_blocks:
         return new_content
 
@@ -679,6 +601,7 @@ def handle_fixed_count(ack, body, client, logger):
     count = int(action.get("selected_option", {}).get("value", "1"))
     user_id = body["user"]["id"]
 
+    # Find staff_id and period from the "希望休なし" button in the same message
     staff_id, period_start, period_end = "", "", ""
     for block in body["message"]["blocks"]:
         for elem in block.get("elements", []):
@@ -694,10 +617,10 @@ def handle_fixed_count(ack, body, client, logger):
     update_message(client, body, new_blocks, f"希望休入力（{count}日選択中）")
 
 
-# Handler: no days off
+# Handler: 希望休なし
 @bolt_app.action("fixednone")
 def handle_fixed_none(ack, body, client, logger):
-    """Handle no-days-off button."""
+    """Handle 希望休なし button."""
     ack()
 
     action = body["actions"][0]
@@ -712,14 +635,14 @@ def handle_fixed_none(ack, body, client, logger):
     update_message(client, body, new_blocks, "希望休なし登録済み")
 
 
-# Handler: datepicker changes -- just ack
+# Handler: datepicker changes — just ack
 @bolt_app.action(re.compile(r"^fixeddate_\d+$"))
 def handle_fixed_date_change(ack, body, logger):
     """Ack datepicker changes."""
     ack()
 
 
-# Handler: submit selected dates
+# Handler: 送信
 @bolt_app.action("fixedsubmit")
 def handle_fixed_submit(ack, body, client, logger):
     """Handle submit of selected dates."""
@@ -753,6 +676,7 @@ def handle_fixed_submit(ack, body, client, logger):
 
     logger.info(f"Fixed submit: {staff_id} / {selected_dates} by {user_name}")
 
+    # Save each date to kintone as 希望休
     all_ok = True
     for date_str in selected_dates:
         ok = upsert_kintone_shift(staff_id, date_str, "希望休")
@@ -762,7 +686,7 @@ def handle_fixed_submit(ack, body, client, logger):
     if not all_ok:
         client.chat_postMessage(
             channel=user_id,
-            text="⚠️ 一部の日付でkintone登録に失敗しました。管理者に連絡してください。",
+            text=f"⚠️ 一部の日付でkintone登録に失敗しました。管理者に連絡してください。",
         )
 
     new_content = build_fixed_confirmed_blocks(staff_id, selected_dates, period_start, period_end)
@@ -771,7 +695,7 @@ def handle_fixed_submit(ack, body, client, logger):
                    f"希望休 {len(selected_dates)}日登録済み")
 
 
-# Handler: back from datepicker to count selection
+# Handler: 戻る (datepicker → count selection)
 @bolt_app.action("fixedback")
 def handle_fixed_back(ack, body, client, logger):
     """Handle back button to return to count selection."""
@@ -785,7 +709,7 @@ def handle_fixed_back(ack, body, client, logger):
     update_message(client, body, new_blocks, "希望休入力")
 
 
-# Handler: edit from confirmed state
+# Handler: 修正 (confirmed → count selection)
 @bolt_app.action("fixededit")
 def handle_fixed_edit(ack, body, client, logger):
     """Handle edit button to re-enter from confirmed state."""
@@ -799,25 +723,72 @@ def handle_fixed_edit(ack, body, client, logger):
     update_message(client, body, new_blocks, "希望休入力")
 
 
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# Auto post-approval trigger (from GAS approval)
+# -----------------------------------------------------------------------
 
-# Mount Bolt app onto Flask using SlackRequestHandler
-from slack_bolt.adapter.flask import SlackRequestHandler
-handler = SlackRequestHandler(bolt_app)
+@bolt_app.message(re.compile(r"\[auto-post-approval\]\s+(\S+)"))
+def handle_auto_post_approval(message, say, logger, context):
+    """Detect GAS approval trigger message and run post-approval automatically."""
+    import subprocess
 
+    match = context["matches"][0] if context.get("matches") else None
+    if not match:
+        return
 
-@flask_app.route("/slack/events", methods=["POST"])
-def slack_events():
-    return handler.handle(request)
+    schedule_version = match.group(1) if hasattr(match, 'group') else match
+    # Extract version from regex match
+    text = message.get("text", "")
+    m = re.search(r"\[auto-post-approval\]\s+(\S+)", text)
+    if not m:
+        return
+    schedule_version = m.group(1)
 
+    logger.info(f"Auto post-approval triggered: {schedule_version}")
 
-@flask_app.route("/slack/interactions", methods=["POST"])
-def slack_interactions():
-    return handler.handle(request)
+    say(
+        text=f"⚙️ 後続処理を開始します... (version: {schedule_version})",
+        thread_ts=message["ts"],
+    )
+
+    # Run run_post_approval.py in background
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cmd = [sys.executable, os.path.join(script_dir, "run_post_approval.py"), schedule_version]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        output = result.stdout[-1500:] if result.stdout else ""
+        errors = result.stderr[-500:] if result.stderr else ""
+
+        if result.returncode == 0:
+            say(
+                text=f"✅ 後続処理が完了しました。\n```\n{output}\n```",
+                thread_ts=message["ts"],
+            )
+        else:
+            say(
+                text=f"⚠️ 後続処理でエラーが発生しました (code={result.returncode}):\n```\n{output}\n{errors}\n```",
+                thread_ts=message["ts"],
+            )
+    except subprocess.TimeoutExpired:
+        say(
+            text="❌ 後続処理がタイムアウトしました（5分超過）。手動で確認してください。",
+            thread_ts=message["ts"],
+        )
+    except Exception as e:
+        say(
+            text=f"❌ 後続処理の実行に失敗しました: {e}",
+            thread_ts=message["ts"],
+        )
 
 
 if __name__ == "__main__":
-    logger.info(f"Starting Bolt server (HTTP mode) on port {PORT}...")
-    flask_app.run(host="0.0.0.0", port=PORT)
+    logger.info("Starting Bolt server (Socket Mode)...")
+    socket_handler = SocketModeHandler(bolt_app, SLACK_APP_TOKEN)
+    socket_handler.start()
