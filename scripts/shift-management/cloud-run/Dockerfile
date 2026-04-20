@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY bolt_server.py .
+COPY config.py .
 
 # Cloud Run sets PORT env var (default 8080)
 ENV PORT=8080
