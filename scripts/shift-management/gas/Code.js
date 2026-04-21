@@ -3240,7 +3240,7 @@ function syncToCalendar_(confirmedDays, year, deleteOld) {
     var config = STORE_CAL_CONFIG[entry.store];
     if (!config) continue;
 
-    // --- 既存イベント削除 (変更更新時のみ) ---
+    // --- 既存イベント削除 (変更更新時のみ、[shift-sync]タグ付きのみ対象) ---
     if (deleteOld) {
       var d = new Date(entry.date + 'T00:00:00');
       var nextD = new Date(d);
@@ -3248,7 +3248,7 @@ function syncToCalendar_(confirmedDays, year, deleteOld) {
       try {
         var existingEvents = cal.getEvents(d, nextD, { search: config.title });
         existingEvents.forEach(function(ev) {
-          if (ev.getTitle() === config.title) {
+          if (ev.getTitle() === config.title && (ev.getDescription() || '').indexOf('[shift-sync]') >= 0) {
             ev.deleteEvent();
             deleted++;
           }
@@ -3281,7 +3281,7 @@ function syncToCalendar_(confirmedDays, year, deleteOld) {
 
     var event = {
       summary: config.title,
-      description: descLines.join('\n'),
+      description: descLines.join('\n') + '\n\n[shift-sync]',
       start: { date: entry.date },
       end: { date: nextDayStr },
       colorId: config.colorId,
@@ -3333,7 +3333,7 @@ function deleteCalendarEvents_(dates) {
       try {
         var events = cal.getEvents(d, nextD, { search: title });
         events.forEach(function(ev) {
-          if (ev.getTitle() === title) {
+          if (ev.getTitle() === title && (ev.getDescription() || '').indexOf('[shift-sync]') >= 0) {
             ev.deleteEvent();
             deleted++;
           }
