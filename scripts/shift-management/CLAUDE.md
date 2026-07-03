@@ -1,109 +1,89 @@
-# シフト管理システム - ガードレール & ルール
+# シフト労務管理システム v2 - ガードレール & ルール
 
-## 1. 正本管理
+**2026-07-03 全面刷新**: kintone/Cloud Run/Python パイプラインを全廃し、
+**Slack（入力・通知） + Googleスプレッドシート（正本） + Googleカレンダー（共有）** の3点構成に再構築。
+頭脳は GAS 1本（`gas/Code.js`）。旧構成は `archive/` に退避（git履歴あり）。
 
-- **確定シフトの正本**: kintone ID=212 のみ
-- **スプレッドシート**: レビュー・承認UIとして使用。正本ではない
-- **承認後のデータ**: immutableとして扱う。変更は新バージョンとして発番
+## 1. 構成（v2）
 
-## 2. 主キー原則
-
-- **staff_id** (S001形式) を全処理の不変主キーとする
-- staff_nameを主キーとして使用禁止（表示名としてのみ使用可）
-- Slack ID / LINE UID / Calendar / kintoneレコードは全て staff_id で紐づける
-
-## 3. 必須概念
-
-以下のIDは全処理で一貫して使用すること:
-
-| ID | 形式 | 説明 |
-|---|---|---|
-| staff_id | S001 | スタッフ不変ID |
-| period_id | 2026-03-09_2026-03-22 | シフト期間ID (start_end) |
-| schedule_version | 2026-03-09_v1 | 承認済みバージョン |
-| assignment_id | S001_2026-03-09 | スタッフ×日付の割当ID |
-
-## 4. 書き込み前チェック (必須)
-
-全スクリプトは書き込み前に以下を検証すること:
-
-| チェック項目 | 許可値 |
+| 役割 | 実体 |
 |---|---|
-| SpreadsheetID | `1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU` のみ |
-| kintone App ID | 211 (希望収集), 212 (確定シフト), 213 (スタッフマスタ) のみ |
-| Google Workspace MCP | gw-chillaxy のみ |
-| dry-run | デフォルト True。--no-dry-run で本番実行 |
+| 正本（データ） | スプレッドシート「シフト労務管理」`1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU` |
+| 頭脳 | GAS「シフト管理GAS」Script ID `1RWVWISiDyypxfSCviSOovv2vDbdmIgfwKx25YGASsjVCxd6zIScZVewf`（このリポジトリの `gas/Code.js` が正） |
+| Slack受け口 | GAS Web App（doPost）。Slackアプリ「シフト管理」A0AG9QRBLGH の Interactivity Request URL が向く |
+| AI生成 | Gemini `gemini-2.5-flash`（専用GCPプロジェクト `shift-mgmt-gemini-26`・無料枠・キーは Script Properties `GEMINI_API_KEY`） |
+| 共有 | Googleカレンダー「全体シフト」`[shift-sync]` タグ同期 |
+| 定期実行 | GASトリガーのみ（onEditTrigger / dailyShiftReminder 毎朝 / attendanceCron 10分毎） |
 
-## 5. 禁止事項
+**廃止済み**: kintone 211/212/213（全件バックアップ: Gドライブ `シフト管理_kintoneバックアップ_20260703/`）、
+Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/SmartHR/MF勤怠連携。
+※日報（`daily_report_slack.py` + `daily-report-slack.yml`、kintone 110）は**別機能として現役**。
 
-- gw-master / gw-goodshit / gw-blonde / gw-fujisawa / gw-graytattoo / gw-mtrx への書き込み禁止
-- .env ファイルの内容をログや出力に含めない
-- main branch で dry-run 未確認の本番書き込み禁止
-- APIキー・トークンのハードコード禁止
-- staff_name を主キー・結合キーとして使用禁止
+## 2. シート構成（タブはユーザーがリネームすることがある → GASは gid で解決）
 
-## 6. Claude (LLM) の役割
+| 論理名（コード内定数） | 現在の表示名 | gid | 用途 |
+|---|---|---|---|
+| シフト出力 | シフト作成 | 1533022256 | 作成・確定UI（A1=年/A2=月セレクター、2行=1日、確定/変更チェック） |
+| 希望収集データ | 希望シフト | 1764958489 | 希望のグリッド表示・手入力（A1=年/A2=月） |
+| スタッフマスタ | S | 1657902443 | スタッフ正本（staff_id/氏名/働き方/店舗ブール列/Slack ID…） |
+| 店舗マスタ | T | 375450408 | 店舗正本（種別/勤務開始・終了/最低必要人数） |
+| 共通ルールマスタ | R | 456922734 | 自由記述ルール（AIプロンプトに注入） |
+| 個人シフト | 個人シフト | 363542595 | 個人ビュー（A1=年/A2=月/C2=名前、全てドロップダウン） |
+| シフトデータ | （非表示） | 712324603 | **確定シフトの正本**（1行=staff×日付×店舗） |
+| 希望データ | （非表示） | 1404449834 | **希望の正本**（1行=staff×日付。Slack/手編集の双方から同期） |
+| 勤怠 | （非表示） | 2007718750 | 出勤確認・遅刻記録（Slackボタン応答が自動追記） |
 
-- **候補生成のみ**: シフト案の生成は LLM が行うが、制約検証は Python 側で必ず実行
-- **定期実行基盤として使わない**: cron / GAS トリガー等で自動化
-- **shift_validator.py**: hardルール全件検証。違反時は再生成 (最大3回) または human review
+- 非表示3タブは正本。**削除禁止**。GASが再作成時も自動で非表示にする。
+- gid⇄論理名のマップは `Code.js` の `SN_GID_MAP_`。**タブ追加・作り直し時はここを更新**。
 
-## 7. dry-run 原則
+## 3. 主キー原則（変更なし）
 
-- 全スクリプトは `--dry-run` (デフォルト) / `--no-dry-run` (本番) を持つ
-- 実行前に対象ID・アカウント・書き込み先をログ出力して確認
-- dry-run 時は read のみ実行し write は全てスキップ
+- **staff_id**（S001形式）が全処理の不変主キー。staff_name は表示用。
+- 確定シフトの一意キー: `staff_id + shift_date + store`。
+- 希望の一意キー: `staff_id + date`（upsert）。
 
-## 8. 冪等性 & sync_outbox
+## 4. Slack 連携
 
-- 同じデータを2回処理しても重複登録しない
-- kintone: period_id + staff_id で既存レコードを検索し upsert
-- Calendar: [shift-sync] タグで既存イベントを検索し delete → re-create
-- **sync_outbox**: 送信先ごとに pending/sent/failed/partial_failed を管理
-  - ファイル: sync_outbox.json (git管理外)
-  - 送信先: slack / line / calendar / kintone / mf_kintai
-  - 承認時に schedule_version (例: 2026-04-01_v1) を発番
-  - 各スクリプトは outbox の should_run() をチェックしてから実行
-  - 失敗時は failed として記録し、再実行で自動リトライ
-  - `python3 run_post_approval.py [version]` で全ステップ一括実行
+- アプリ: 「シフト管理」A0AG9QRBLGH（bot user `claude_mcp`）/ チャンネル `#shift-management` C0AKBJ1LTV2
+- Interactivity Request URL: GAS Web App `.../exec?token=<WEBHOOK_TOKEN>`（GASは署名検証不可のためURLトークン方式・p10と同方式）
+- **Web App のコード変更はデプロイ更新が必要**（同一URL維持のため deployments.update で version 差し替え。新規 create_deployment するとURLが変わりSlack再設定になる）
+- 現行デプロイID: `AKfycbxE4CbtJSeI3z36QsoawujDDhbqzpJH1iSqAceWPwpcfpfqc6pzB83HIUYIBvjvRVjg`
+- doPost 管理アクション（token必須）: `&probe=1` 疎通 / `&admin=reload&year=&month=` 再描画 / `&admin=personal` 個人シフト再描画 / `&admin=staffsync` ヘッダ再構築 / `&admin=setprop`（許可キーのみ、POSTボディで）
 
-## 9. 月初処理
+## 5. 業務フロー
 
-- `init_shift_requests.py` を毎月1日に実行して ID=211 のレコードを生成する
-- 対象は shift_type=希望シフト のスタッフのみ（固定シフト・混合は生成しない）
-- (staff_id, shift_date) の重複チェックにより冪等（再実行しても重複しない）
-- cron: 毎月1日朝9時に自動実行
+1. **希望収集**: 毎月1日/15日に dailyShiftReminder が対象期間のDM送信（✅出勤/🙏休み希望ボタン）→ doPost → 希望データ＋グリッド即反映。管理者はグリッド直接編集も可（onEditで正本に同期）
+2. **生成**: メニュー③ → 期間ダイアログ → Gemini生成（検証NG時は最大3回再生成）→ シフト出力に書き込み
+3. **確定**: 出力シートで修正 → A列「確定」チェック → ④ → シフトデータ（正本）＋カレンダー同期
+4. **勤怠（新機能）**: attendanceCron が当日の出勤者へ出勤60分前にDM（🟢時間通り/🕐遅刻します→分数ボタン）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で #shift-management にアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
 
-## 10. エラーハンドリング
+## 6. Script Properties（必須キー）
 
-- 全処理に try-except 実装
-- エラー時は Slack 管理者チャンネル (#shift-management) に通知
-- 通知内容: 発生箇所 / エラー内容 / 日時
+`GEMINI_API_KEY` / `SLACK_BOT_TOKEN` / `SLACK_SHIFT_CHANNEL` / `SHIFT_CALENDAR_ID` / `WEBHOOK_TOKEN`
+（旧 KINTONE_* / ANTHROPIC_API_KEY は残存していても未使用）
 
-## 11. ファイル構成
+## 7. 開発ルール
 
-```
-scripts/shift-management/
-├── CLAUDE.md              # このファイル (ガードレール)
-├── config.py              # 環境変数管理
-├── .env / .env.example    # 認証情報 (git管理外)
-├── init_shift_requests.py # 希望収集レコード一括生成 (月初処理)
-├── slack_shift_bot.py     # Slack Block Kit通知 (希望収集・リマインド・承認完了)
-├── line_bot.py            # LINE個別DM通知 (希望収集・リマインド・承認完了)
-├── liff/                  # LINE LIFF シフト入力フォーム
-├── sync_staff_master.py   # スタッフマスタ同期
-├── sync_smarthr.py        # SmartHR → スタッフマスタ同期
-├── setup_spreadsheet.py   # スプレッドシート初期設定 (データバリデーション等)
-├── generate_shift.py      # AI シフト生成 (店舗配置+個人時間)
-├── shift_validator.py     # hardルール検証 (STEP C)
-├── sync_outbox.py         # 送信先ごとの状態管理 (STEP D)
-├── run_post_approval.py   # 承認後一括実行 (STEP D)
-├── gas_approval.js        # GAS メニュー4機能 (Code.jsのローカルコピー)
-├── notify_shift.py        # Slack/LINE配信 (outbox連携)
-├── calendar_sync.py       # Google Calendar同期 (outbox連携)
-├── kintone_shift_register.py  # kintone確定登録 (outbox連携)
-├── mf_kintai_sync.py      # MFクラウド勤怠同期 (STEP E)
-├── reminder.py            # シフト開始リマインド (STEP F)
-├── test_integration.py    # 統合テスト
-└── test_e2e.py            # E2Eテスト (STEP G)
-```
+- **コードの正はこのリポジトリの `gas/Code.js`**。リモート編集したら必ずローカルへ反映してコミット
+- push は Apps Script API（`~/.google_workspace_mcp/chillaxy/satoru@chillaxy.jp.json` のOAuthでアクセストークン取得 → projects.updateContent）。clasp はトークン失効しがち
+- デプロイ更新: versions.create → deployments.update（**同一デプロイID維持**）
+- シートのA1記法での名前参照はMCP経由だと日本語名で失敗することがある → **gid指定のCSV export / batchUpdate を使う**
+- 全処理 try-except、エラーは `slackError_` で #shift-management へ
+- 破壊的変更前にバックアップ。シートデータは gid指定エクスポートで退避
+
+## 8. 既知の注意点
+
+- Gemini 無料枠: flash は 20リクエスト/日/プロジェクト。専用プロジェクト分離済みだが、生成リトライで消費するので注意
+- Gemini出力はJSON mode + maxOutputTokens 65536 + thinkingBudget 4096。途中切れは finishReason で検出
+- 希望収集グリッドの列レイアウトはスタッフ構成で変動（月初にヘッダ確定、期中は固定運用）
+- メモ列（シフト出力AF）は結合セルがあるため週末色はメモ列手前まで
+- **AIシフト生成の精度調整は未完（2026-07-03時点・後回し指示）**: 営業時間・希望の反映を改善中
+
+## 9. 残タスク（2026-07-03時点）
+
+- [ ] launchd 4本の停止（`com.s.shift-*`。ユーザーの通常ターミナルで bootout 実行が必要 — hook制約）
+- [ ] Cloud Run `shift-bolt-server` サービスの削除（要ユーザー同意・トラフィックは既にゼロ）
+- [ ] kintone 211/212/213 アプリの運用停止・退役（バックアップ済み・要ユーザー同意）
+- [ ] AIシフト生成の精度検証・調整（後回し中）
+- [ ] ④確定→カレンダー、勤怠DMフローの実地検証
+- [ ] メニュー簡素化・ヘッダ保護（任意）
