@@ -888,7 +888,7 @@ function loadWishSheetData_(year, month) {
       if (!dw) continue;
       var idx = day - 1;
 
-      if (dw.shift_type === '休み' || dw.shift_type === '希望休') {
+      if (dw.shift_type === '休み' || dw.shift_type === '希望休' || dw.shift_type === '休み希望') {
         grid[idx][startColIdx] = '×';
         grid[idx][endColIdx] = '×';
         bgGrid[idx][startColIdx] = KOKYU_COLOR;
@@ -914,11 +914,11 @@ function loadWishSheetData_(year, month) {
       if (!dw) continue;
       var idx = day - 1;
 
-      if (dw.shift_type === '休み' || dw.shift_type === '希望休') {
+      if (dw.shift_type === '休み' || dw.shift_type === '希望休' || dw.shift_type === '休み希望') {
         grid[idx][colIdx] = '希望休';
         bgGrid[idx][colIdx] = KOKYU_COLOR;
+        written++;
       }
-      written++;
     }
   }
 
