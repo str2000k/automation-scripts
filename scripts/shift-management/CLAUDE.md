@@ -92,6 +92,6 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
       admin=calsync でイベント作成→内容確認→caldel 掃除まで一次情報で確認）
 - [x] 勤怠DMフローの実地検証（2026-07-06: テストシフト行→cron実発火→DM実受信→勤怠タブ記録→
       att_okボタン応答記録まで全経路確認。テストデータは掃除済み）
-- [x] メニュー簡素化（2026-07-06: 「シフト勤怠管理」①同期/②生成/③確定/④月読込/⚙トリガー の5項目に。
-      外した fetchWishData/debugProperties/renderPersonalShift_ はコードに残置・admin アクションで代替可）
+- [x] メニュー簡素化（2026-07-06: 「シフト勤怠管理」①同期/②生成/③確定/⚙トリガー の4項目に（月データ読込はonEdit自動実行のため除外）。
+      外した loadMonthData/fetchWishData/debugProperties/renderPersonalShift_ はコードに残置・admin アクションで代替可）
 - [ ] ヘッダ保護（任意）

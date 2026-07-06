@@ -7,8 +7,8 @@
  *   ① スタッフマスタ同期: スタッフマスタ → 各シートのヘッダー/ドロップダウン再構築
  *   ② AIシフト生成: Gemini → シフト出力シート
  *   ③ 確定シフト反映: チェック済み行 → シフトデータ(正本) + Google Calendar
- *   ④ 月データ読込: 年月セレクターの値で正本タブからデータを両シートに表示
  *   ⚙ 初期設定 (トリガー)
+ *   ※月データ読込は年月セレクター変更のonEditで自動実行 (手動: admin=reload)
  *
  * シフト出力 横型レイアウト (動的列数):
  *   Row 1: A1=年セレクター + 店舗名ヘッダー (藤沢/伊勢佐木町/新宿/工場/EC/本部オフィス/メモ)
@@ -80,16 +80,16 @@ var NON_RETAIL_STORE_ORDER = ['工場', 'EC', '本部オフィス'];
 // Menu
 // ==========================================================================
 
-// メニューは運用に必要な4項目+初期設定のみ (2026-07-06 簡素化)
+// メニューは運用に必要な3項目+初期設定のみ (2026-07-06 簡素化)
 // メニューから外した関数はコードに残置 (アーカイブ):
-//   fetchWishData(希望グリッド再描画=②月データ読込と重複) / debugProperties(doPost probe/admin で代替) /
+//   loadMonthData(年月セレクター変更のonEditで自動実行・admin=reloadでも代替) /
+//   fetchWishData(希望グリッド再描画=loadMonthDataと重複) / debugProperties(doPost probe/admin で代替) /
 //   renderPersonalShift_(セレクターonEdit + admin=personal で自動/代替)
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('シフト勤怠管理')
     .addItem('① スタッフマスタ同期', 'syncStaffMaster')
     .addItem('② AIシフト生成', 'generateShift')
     .addItem('③ 確定シフト反映', 'syncConfirmedShift')
-    .addItem('④ 月データ読込 (年月セレクター連動)', 'loadMonthData')
     .addSeparator()
     .addItem('⚙ 初期設定 (トリガー)', 'setupTrigger')
     .addToUi();
