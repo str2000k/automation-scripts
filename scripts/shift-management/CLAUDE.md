@@ -10,7 +10,7 @@
 |---|---|
 | 正本（データ） | スプレッドシート「シフト労務管理」`1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU` |
 | 頭脳 | GAS「シフト管理GAS」Script ID `1RWVWISiDyypxfSCviSOovv2vDbdmIgfwKx25YGASsjVCxd6zIScZVewf`（このリポジトリの `gas/Code.js` が正） |
-| Slack受け口 | GAS Web App（doPost）。Slackアプリ「シフト管理」A0AG9QRBLGH の Interactivity Request URL が向く |
+| Slack受け口 | GAS Web App（doPost）。Slackアプリ「勤怠管理」A0AG9QRBLGH の Interactivity Request URL が向く |
 | AI生成 | Gemini `gemini-2.5-flash`（専用GCPプロジェクト `shift-mgmt-gemini-26`・無料枠・キーは Script Properties `GEMINI_API_KEY`） |
 | 共有 | Googleカレンダー「全体シフト」`[shift-sync]` タグ同期 |
 | 定期実行 | GASトリガーのみ（onEditTrigger / dailyShiftReminder 毎朝 / attendanceCron 10分毎） |
@@ -44,7 +44,7 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 
 ## 4. Slack 連携
 
-- アプリ: 「シフト管理」A0AG9QRBLGH（bot user `claude_mcp`）/ チャンネル `#shift-management` C0AKBJ1LTV2
+- アプリ: 「勤怠管理」A0AG9QRBLGH（bot user `claude_mcp`・旧名「シフト管理」）/ チャンネル `#3002-直営共有-勤怠管理` C0AKBJ1LTV2（旧 #shift-management。2026-07-06リネーム・ID不変）
 - Interactivity Request URL: GAS Web App `.../exec?token=<WEBHOOK_TOKEN>`（GASは署名検証不可のためURLトークン方式・p10と同方式）
 - **Web App のコード変更はデプロイ更新が必要**（同一URL維持のため deployments.update で version 差し替え。新規 create_deployment するとURLが変わりSlack再設定になる）
 - 現行デプロイID: `AKfycbxE4CbtJSeI3z36QsoawujDDhbqzpJH1iSqAceWPwpcfpfqc6pzB83HIUYIBvjvRVjg`
@@ -56,7 +56,7 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 1. **希望収集**: 毎月1日/15日に dailyShiftReminder が対象期間のDM送信（✅出勤/🙏休み希望ボタン）→ doPost → 希望データ＋グリッド即反映。管理者はグリッド直接編集も可（onEditで正本に同期）
 2. **生成**: メニュー③ → 期間ダイアログ → Gemini生成（検証NG時は最大3回再生成）→ シフト出力に書き込み
 3. **確定**: 出力シートで修正 → A列「確定」チェック → ④ → シフトデータ（正本）＋カレンダー同期
-4. **勤怠（新機能）**: attendanceCron が出勤60分前に #shift-management へメンション付き出勤確認を投稿（🟢通常出勤/🕐遅刻→5分刻みドロップダウンで分数選択。本人と管理者のみ操作可・2026-07-06にDM方式から変更）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で同チャンネルにアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
+4. **勤怠（新機能）**: attendanceCron が出勤60分前に #3002-直営共有-勤怠管理 へメンション付き出勤確認を投稿（🟢通常出勤/🕐遅刻→5分刻みドロップダウンで分数選択。本人と管理者のみ操作可・2026-07-06にDM方式から変更）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で同チャンネルにアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
 
 ## 6. Script Properties（必須キー）
 
@@ -69,7 +69,7 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 - push は Apps Script API（`~/.google_workspace_mcp/chillaxy/satoru@chillaxy.jp.json` のOAuthでアクセストークン取得 → projects.updateContent）。clasp はトークン失効しがち
 - デプロイ更新: versions.create → deployments.update（**同一デプロイID維持**）
 - シートのA1記法での名前参照はMCP経由だと日本語名で失敗することがある → **gid指定のCSV export / batchUpdate を使う**
-- 全処理 try-except、エラーは `slackError_` で #shift-management へ
+- 全処理 try-except、エラーは `slackError_` で #3002-直営共有-勤怠管理 へ
 - 破壊的変更前にバックアップ。シートデータは gid指定エクスポートで退避
 
 ## 8. 既知の注意点
