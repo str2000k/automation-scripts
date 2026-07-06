@@ -3548,6 +3548,37 @@ function doPost(e) {
         var r = updateShiftOutputLayout_(staff);
         return ContentService.createTextOutput('staffsync ok: wish=' + c + ' output=' + (r && r.message));
       }
+      if (act === 'calsync') {
+        // 検証用: テストエントリ1件をカレンダー同期 (掃除は admin=caldel)
+        var cd = e.parameter.date || '';
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(cd)) return ContentService.createTextOutput('date required (YYYY-MM-DD)');
+        if (e.parameter.debug === '1') {
+          // Calendar API 直POSTの生レスポンスを返す (失敗原因の特定用)
+          var dbgResp = UrlFetchApp.fetch(
+            'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(getProp_('SHIFT_CALENDAR_ID')) + '/events?sendUpdates=none',
+            { method: 'post', contentType: 'application/json',
+              headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() },
+              payload: JSON.stringify({ summary: '藤沢店', description: '[shift-sync]', start: { date: cd }, end: { date: cd }, colorId: '9' }),
+              muteHttpExceptions: true });
+          return ContentService.createTextOutput('debug ' + dbgResp.getResponseCode() + ': ' + dbgResp.getContentText().slice(0, 500));
+        }
+        var cres = syncToCalendar_([{
+          date: cd,
+          store: e.parameter.store || '藤沢',
+          staff_name: e.parameter.name || '【検証】テスト',
+          start_time: e.parameter.start || '11:00',
+          end_time: e.parameter.end || '20:00',
+          shift_status: '出勤',
+        }], cd.slice(0, 4), e.parameter.deleteold === '1');
+        return ContentService.createTextOutput('calsync ok: created=' + cres.created + ' deleted=' + cres.deleted);
+      }
+      if (act === 'caldel') {
+        // 検証用: 指定日の [shift-sync] イベントを全店舗分削除
+        var dd = e.parameter.date || '';
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dd)) return ContentService.createTextOutput('date required (YYYY-MM-DD)');
+        var dres = deleteCalendarEvents_([dd]);
+        return ContentService.createTextOutput('caldel ok: deleted=' + dres.deleted);
+      }
       return ContentService.createTextOutput('unknown admin action');
     }
     if (e.parameter && e.parameter.payload) {

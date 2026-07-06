@@ -48,7 +48,8 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 - Interactivity Request URL: GAS Web App `.../exec?token=<WEBHOOK_TOKEN>`（GASは署名検証不可のためURLトークン方式・p10と同方式）
 - **Web App のコード変更はデプロイ更新が必要**（同一URL維持のため deployments.update で version 差し替え。新規 create_deployment するとURLが変わりSlack再設定になる）
 - 現行デプロイID: `AKfycbxE4CbtJSeI3z36QsoawujDDhbqzpJH1iSqAceWPwpcfpfqc6pzB83HIUYIBvjvRVjg`
-- doPost 管理アクション（token必須）: `&probe=1` 疎通 / `&admin=reload&year=&month=` 再描画 / `&admin=personal` 個人シフト再描画 / `&admin=staffsync` ヘッダ再構築 / `&admin=setprop`（許可キーのみ、POSTボディで）
+- doPost 管理アクション（token必須）: `&probe=1` 疎通 / `&admin=reload&year=&month=` 再描画 / `&admin=personal` 個人シフト再描画 / `&admin=staffsync` ヘッダ再構築 / `&admin=setprop`（許可キーのみ、POSTボディで） / `&admin=calsync&date=YYYY-MM-DD` カレンダー同期の実地テスト（`&debug=1`で生レスポンス） / `&admin=caldel&date=` 指定日の[shift-sync]イベント削除
+- **Calendar Advanced Service 必須**（2026-07-06修正）: `appsscript.json` の `enabledAdvancedServices` に calendar v3。これがないとスクリプトのGCPプロジェクトで Calendar REST API が無効のまま → `syncToCalendar_` の UrlFetch が全件403で `created=0` になる（例外は出ない）
 
 ## 5. 業務フロー
 
