@@ -7,8 +7,8 @@
  *   ① スタッフマスタ同期: スタッフマスタ → 各シートのヘッダー/ドロップダウン再構築
  *   ② AIシフト生成: Gemini → シフト出力シート
  *   ③ 確定シフト反映: チェック済み行 → シフトデータ(正本) + Google Calendar
- *   ⚙ 初期設定 (トリガー)
  *   ※月データ読込は年月セレクター変更のonEditで自動実行 (手動: admin=reload)
+ *   ※トリガー復旧は admin=triggers (onEditは主要関数のensureTrigger_でも自己修復)
  *
  * シフト出力 横型レイアウト (動的列数):
  *   Row 1: A1=年セレクター + 店舗名ヘッダー (藤沢/伊勢佐木町/新宿/工場/EC/本部オフィス/メモ)
@@ -80,18 +80,17 @@ var NON_RETAIL_STORE_ORDER = ['工場', 'EC', '本部オフィス'];
 // Menu
 // ==========================================================================
 
-// メニューは運用に必要な3項目+初期設定のみ (2026-07-06 簡素化)
+// メニューは運用に必要な3項目のみ (2026-07-06 簡素化)
 // メニューから外した関数はコードに残置 (アーカイブ):
 //   loadMonthData(年月セレクター変更のonEditで自動実行・admin=reloadでも代替) /
 //   fetchWishData(希望グリッド再描画=loadMonthDataと重複) / debugProperties(doPost probe/admin で代替) /
-//   renderPersonalShift_(セレクターonEdit + admin=personal で自動/代替)
+//   renderPersonalShift_(セレクターonEdit + admin=personal で自動/代替) /
+//   setupTrigger(onEditは主要関数のensureTrigger_で自己修復・全復旧は admin=triggers)
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('シフト勤怠管理')
     .addItem('① スタッフマスタ同期', 'syncStaffMaster')
     .addItem('② AIシフト生成', 'generateShift')
     .addItem('③ 確定シフト反映', 'syncConfirmedShift')
-    .addSeparator()
-    .addItem('⚙ 初期設定 (トリガー)', 'setupTrigger')
     .addToUi();
 }
 
@@ -3590,6 +3589,21 @@ function doPost(e) {
           shift_status: '出勤',
         }], cd.slice(0, 4), e.parameter.deleteold === '1');
         return ContentService.createTextOutput('calsync ok: created=' + cres.created + ' deleted=' + cres.deleted);
+      }
+      if (act === 'triggers') {
+        // 復旧用: 3トリガー (onEdit/勤怠cron/希望リマインド) を未設定なら作成
+        var t1 = ensureTrigger_();
+        var t2 = ensureAttendanceTrigger_();
+        var t3 = false;
+        var hasDaily = ScriptApp.getProjectTriggers().some(function(t) {
+          return t.getHandlerFunction() === 'dailyShiftReminder';
+        });
+        if (!hasDaily) {
+          ScriptApp.newTrigger('dailyShiftReminder').timeBased().everyDays(1).atHour(9).create();
+          t3 = true;
+        }
+        return ContentService.createTextOutput('triggers ok: onEdit=' + (t1 ? '作成' : '既存')
+          + ' attendanceCron=' + (t2 ? '作成' : '既存') + ' dailyReminder=' + (t3 ? '作成' : '既存'));
       }
       if (act === 'caldel') {
         // 検証用: 指定日の [shift-sync] イベントを全店舗分削除

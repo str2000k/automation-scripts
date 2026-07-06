@@ -48,7 +48,7 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 - Interactivity Request URL: GAS Web App `.../exec?token=<WEBHOOK_TOKEN>`（GASは署名検証不可のためURLトークン方式・p10と同方式）
 - **Web App のコード変更はデプロイ更新が必要**（同一URL維持のため deployments.update で version 差し替え。新規 create_deployment するとURLが変わりSlack再設定になる）
 - 現行デプロイID: `AKfycbxE4CbtJSeI3z36QsoawujDDhbqzpJH1iSqAceWPwpcfpfqc6pzB83HIUYIBvjvRVjg`
-- doPost 管理アクション（token必須）: `&probe=1` 疎通 / `&admin=reload&year=&month=` 再描画 / `&admin=personal` 個人シフト再描画 / `&admin=staffsync` ヘッダ再構築 / `&admin=setprop`（許可キーのみ、POSTボディで） / `&admin=calsync&date=YYYY-MM-DD` カレンダー同期の実地テスト（`&debug=1`で生レスポンス） / `&admin=caldel&date=` 指定日の[shift-sync]イベント削除
+- doPost 管理アクション（token必須）: `&probe=1` 疎通 / `&admin=reload&year=&month=` 再描画 / `&admin=personal` 個人シフト再描画 / `&admin=staffsync` ヘッダ再構築 / `&admin=setprop`（許可キーのみ、POSTボディで） / `&admin=calsync&date=YYYY-MM-DD` カレンダー同期の実地テスト（`&debug=1`で生レスポンス） / `&admin=caldel&date=` 指定日の[shift-sync]イベント削除 / `&admin=triggers` トリガー復旧（3種を未設定なら作成）
 - **Calendar Advanced Service 必須**（2026-07-06修正）: `appsscript.json` の `enabledAdvancedServices` に calendar v3。これがないとスクリプトのGCPプロジェクトで Calendar REST API が無効のまま → `syncToCalendar_` の UrlFetch が全件403で `created=0` になる（例外は出ない）
 
 ## 5. 業務フロー
@@ -92,6 +92,6 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
       admin=calsync でイベント作成→内容確認→caldel 掃除まで一次情報で確認）
 - [x] 勤怠DMフローの実地検証（2026-07-06: テストシフト行→cron実発火→DM実受信→勤怠タブ記録→
       att_okボタン応答記録まで全経路確認。テストデータは掃除済み）
-- [x] メニュー簡素化（2026-07-06: 「シフト勤怠管理」①同期/②生成/③確定/⚙トリガー の4項目に（月データ読込はonEdit自動実行のため除外）。
-      外した loadMonthData/fetchWishData/debugProperties/renderPersonalShift_ はコードに残置・admin アクションで代替可）
+- [x] メニュー簡素化（2026-07-06: 「シフト勤怠管理」①同期/②生成/③確定 の3項目のみに（月読込=onEdit自動、トリガー=admin=triggersで復旧可のため除外）。
+      外した loadMonthData/fetchWishData/debugProperties/renderPersonalShift_/setupTrigger はコードに残置・admin アクションで代替可）
 - [ ] ヘッダ保護（任意）
