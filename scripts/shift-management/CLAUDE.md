@@ -82,8 +82,7 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 
 ## 9. 残タスク（2026-07-06更新）
 
-- [ ] launchd 4本の停止（`com.s.shift-*`。ユーザーの通常ターミナルで bootout 実行が必要 — hook制約。
-      4本とも archive 移動済みスクリプトを指しており全て起動失敗中。特に bolt-server は KeepAlive で失敗ループ）
+- [x] launchd 4本の停止（2026-07-06 ユーザー実行。bootout + plist を `~/.Trash/launchagents-shift-backup/` に退避・復元可能）
 - [x] Cloud Run `shift-bolt-server` 削除済み（2026-07-06。Slack Event Subscriptions Off →削除→ airregi-webhook のみ残存を確認。
       設定バックアップ: `archive/cloud-run/shift-bolt-server_backup_20260706.yaml`）
 - [x] kintone 211/212/213 の運用停止（2026-07-06: 「【退役】」リネーム+説明にバックアップ所在を記載・deploy済み。
