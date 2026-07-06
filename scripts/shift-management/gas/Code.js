@@ -3626,6 +3626,14 @@ function staffNameById_(staffId) {
   return '';
 }
 
+function staffSlackById_(staffId) {
+  var staff = readStaffMaster_();
+  for (var i = 0; i < staff.length; i++) {
+    if (staff[i]['staff_id'] === staffId) return String(staff[i]['Slack ID'] || '');
+  }
+  return '';
+}
+
 function handleSlackInteraction_(payload) {
   var actions = payload.actions || [];
   if (!actions.length) return;
@@ -3735,40 +3743,48 @@ function handleSlackInteraction_(payload) {
     return;
   }
 
-  // --- 勤怠: 時間通り ---
+  // --- 勤怠: 通常出勤 ---
   if (aid === 'att_ok') {
     var p = action.value.split('|');
+    if (!attendClickerOk_(payload, p[0], responseUrl)) return;
     kintaiRespond_(p[1], p[0], '時間通り', 0);
-    respondSlack_(responseUrl, { replace_original: true, text: '🟢 出勤確認を受け付けました。本日もよろしくお願いします！' });
+    respondSlack_(responseUrl, { replace_original: true,
+      text: '🟢 ' + attendMention_(p[0]) + ' 出勤確認を受け付けました。本日もよろしくお願いします！' });
     return;
   }
 
-  // --- 勤怠: 遅刻 → 分数選択 ---
+  // --- 勤怠: 遅刻 → 分数選択 (ドロップダウン・5分刻み) ---
   if (aid === 'att_late') {
     var val = action.value; // staffId|date
-    var elems = [];
-    [5, 10, 15, 30, 45, 60].forEach(function(min) {
-      elems.push({ type: 'button', text: { type: 'plain_text', text: min + '分' }, value: val + '|' + min, action_id: 'attmin_' + min });
-    });
+    var staffId = val.split('|')[0];
+    if (!attendClickerOk_(payload, staffId, responseUrl)) return;
+    var opts = [];
+    for (var mi = 5; mi <= 60; mi += 5) {
+      opts.push({ text: { type: 'plain_text', text: mi + '分' }, value: val + '|' + mi });
+    }
     respondSlack_(responseUrl, {
       replace_original: true,
       text: 'どのくらい遅れそうですか？',
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: '🕐 どのくらい遅れそうですか？' } },
-        { type: 'actions', block_id: 'attmin_block', elements: elems },
+        { type: 'section', text: { type: 'mrkdwn', text: '🕐 ' + attendMention_(staffId) + ' どのくらい遅れそうですか？' } },
+        { type: 'actions', block_id: 'attmin_block', elements: [
+          { type: 'static_select', placeholder: { type: 'plain_text', text: '遅刻時間を選択' },
+            options: opts, action_id: 'attmin_select' },
+        ] },
       ],
     });
     return;
   }
 
-  // --- 勤怠: 遅刻分数 ---
-  if (aid.indexOf('attmin_') === 0) {
-    var p = action.value.split('|'); // staffId|date|min
+  // --- 勤怠: 遅刻分数 (ドロップダウン選択。旧ボタン attmin_N も互換受理) ---
+  if (aid === 'attmin_select' || aid.indexOf('attmin_') === 0) {
+    var v = (action.selected_option && action.selected_option.value) || action.value;
+    var p = v.split('|'); // staffId|date|min
     var staffId = p[0], dateStr = p[1], min = parseInt(p[2], 10) || 0;
+    if (!attendClickerOk_(payload, staffId, responseUrl)) return;
     kintaiRespond_(dateStr, staffId, '遅刻', min);
-    var staffName = staffNameById_(staffId);
-    slackPost_('🕐 *遅刻連絡* ' + staffName + ' さん: ' + dateStr + ' 約' + min + '分遅刻の連絡がありました');
-    respondSlack_(responseUrl, { replace_original: true, text: '🕐 遅刻 約' + min + '分 で記録しました。気をつけてお越しください。' });
+    respondSlack_(responseUrl, { replace_original: true,
+      text: '🕐 *遅刻連絡* ' + attendMention_(staffId) + ' ' + dateStr + ' 約' + min + '分遅刻で記録しました。気をつけてお越しください。' });
     return;
   }
 
@@ -3826,9 +3842,9 @@ function kintaiRespond_(dateStr, staffId, response, lateMinutes) {
 
 /**
  * 出勤確認クロン (10分ごとの時間トリガーで実行)
- *  - 出勤 ATTEND_NOTIFY_MIN 分前 (デフォルト60): 出勤確認DM
- *  - 出勤 ATTEND_RENOTIFY_MIN 分前 (デフォルト30): 未応答なら再DM
- *  - 出勤時刻経過: 未応答なら管理者チャンネルへアラート
+ *  - 出勤 ATTEND_NOTIFY_MIN 分前 (デフォルト60): #shift-management にメンション付き出勤確認を投稿
+ *  - 出勤 ATTEND_RENOTIFY_MIN 分前 (デフォルト30): 未応答なら再投稿
+ *  - 出勤時刻経過: 未応答なら同チャンネルへアラート
  */
 function attendanceCron() {
   var tz = Session.getScriptTimeZone();
@@ -3857,7 +3873,6 @@ function attendanceCron() {
 
   var notifyMin = parseInt(getProp_('ATTEND_NOTIFY_MIN') || '60', 10);
   var renotifyMin = parseInt(getProp_('ATTEND_RENOTIFY_MIN') || '30', 10);
-  var token = getProp_('SLACK_BOT_TOKEN');
   var nowStr = Utilities.formatDate(now, tz, 'HH:mm');
 
   for (var sid in byStaff) {
@@ -3867,14 +3882,14 @@ function attendanceCron() {
     var kint = kintaiFindRow_(today, sid);
 
     if (!kint && diff > 0 && diff <= notifyMin) {
-      // 初回通知
-      if (slackId && token) sendAttendanceDm_(token, slackId, sid, r, today);
+      // 初回通知 (チャンネル投稿・Slack ID未登録者は氏名表記)
+      sendAttendanceNotice_(slackId, sid, r, today);
       var sh = kintaiSheet_();
       sh.getRange(sh.getLastRow() + 1, 1, 1, KINTAI_HEADERS.length)
         .setValues([[today, sid, r.staff_name, r.store, r.start_time, nowStr, '', '', '', '', '']]);
     } else if (kint && !kint.response && !kint.renotified_at && diff > 0 && diff <= renotifyMin) {
       // 再通知
-      if (slackId && token) sendAttendanceDm_(token, slackId, sid, r, today);
+      sendAttendanceNotice_(slackId, sid, r, today);
       kintaiSheet_().getRange(kint.row, 7).setValue(nowStr);
     } else if (kint && !kint.response && !kint.alerted && diff <= 0) {
       // 未応答アラート
@@ -3886,16 +3901,37 @@ function attendanceCron() {
   }
 }
 
-function sendAttendanceDm_(token, slackId, staffId, entry, dateStr) {
+// 出勤確認は #shift-management チャンネルにメンション付きで投稿 (2026-07-06 DM方式から変更)
+function sendAttendanceNotice_(slackId, staffId, entry, dateStr) {
+  var mention = slackId ? '<@' + slackId + '>' : entry.staff_name + ' さん';
   var blocks = [
     { type: 'section', text: { type: 'mrkdwn',
-      text: '本日 *' + entry.store + ' ' + entry.start_time + '〜' + (entry.end_time || '') + '* の出勤です。\n出勤確認をお願いします。' } },
+      text: mention + '\n本日 *' + entry.store + ' ' + entry.start_time + '〜' + (entry.end_time || '') + '* の出勤です。\n出勤確認をお願いします。' } },
     { type: 'actions', block_id: 'attend_' + dateStr, elements: [
-      { type: 'button', text: { type: 'plain_text', text: '🟢 時間通り出勤します' }, style: 'primary', value: staffId + '|' + dateStr, action_id: 'att_ok' },
-      { type: 'button', text: { type: 'plain_text', text: '🕐 遅刻します' }, style: 'danger', value: staffId + '|' + dateStr, action_id: 'att_late' },
+      { type: 'button', text: { type: 'plain_text', text: '🟢 通常出勤' }, style: 'primary', value: staffId + '|' + dateStr, action_id: 'att_ok' },
+      { type: 'button', text: { type: 'plain_text', text: '🕐 遅刻' }, style: 'danger', value: staffId + '|' + dateStr, action_id: 'att_late' },
     ] },
   ];
-  slackDM_(token, slackId, blocks, '【出勤確認】' + dateStr + ' ' + entry.store + ' ' + entry.start_time + '〜');
+  slackPost_('【出勤確認】' + dateStr + ' ' + entry.store + ' ' + entry.start_time + '〜', blocks);
+}
+
+// 出勤確認ボタンのメンション表記 (Slack ID未登録者は氏名)
+function attendMention_(staffId) {
+  var slackId = staffSlackById_(staffId);
+  return slackId ? '<@' + slackId + '>' : staffNameById_(staffId) + ' さん';
+}
+
+// チャンネル方式のため本人 (または管理者) 以外の操作を拒否
+function attendClickerOk_(payload, staffId, responseUrl) {
+  var clicker = (payload.user && payload.user.id) || '';
+  var target = staffSlackById_(staffId);
+  var admin = getProp_('SLACK_ADMIN_ID') || 'U07UBN61QFN';
+  if (target && clicker && clicker !== target && clicker !== admin) {
+    respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false,
+      text: '⚠ この出勤確認は本人のみ操作できます' });
+    return false;
+  }
+  return true;
 }
 
 // 勤怠クロンのトリガーを設定 (メニュー⑥から)

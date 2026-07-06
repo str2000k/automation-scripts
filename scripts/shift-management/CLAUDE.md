@@ -56,7 +56,7 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 1. **希望収集**: 毎月1日/15日に dailyShiftReminder が対象期間のDM送信（✅出勤/🙏休み希望ボタン）→ doPost → 希望データ＋グリッド即反映。管理者はグリッド直接編集も可（onEditで正本に同期）
 2. **生成**: メニュー③ → 期間ダイアログ → Gemini生成（検証NG時は最大3回再生成）→ シフト出力に書き込み
 3. **確定**: 出力シートで修正 → A列「確定」チェック → ④ → シフトデータ（正本）＋カレンダー同期
-4. **勤怠（新機能）**: attendanceCron が当日の出勤者へ出勤60分前にDM（🟢時間通り/🕐遅刻します→分数ボタン）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で #shift-management にアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
+4. **勤怠（新機能）**: attendanceCron が出勤60分前に #shift-management へメンション付き出勤確認を投稿（🟢通常出勤/🕐遅刻→5分刻みドロップダウンで分数選択。本人と管理者のみ操作可・2026-07-06にDM方式から変更）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で同チャンネルにアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
 
 ## 6. Script Properties（必須キー）
 
