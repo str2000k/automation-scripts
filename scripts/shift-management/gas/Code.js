@@ -1,14 +1,14 @@
 /**
- * シフト管理システム - Google Apps Script
+ * シフト勤怠管理システム v2 - Google Apps Script
  *
- * スプレッドシート: 1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU
+ * スプレッドシート「シフト勤怠管理」: 1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU
  *
- * メニュー「シフト管理」:
- *   ① スタッフマスタ同期: スタッフマスタ → 希望収集データヘッダー + kintone 213
- *   ② 希望シフト取得: kintone 211 → 希望収集データ (年月セレクター連動)
- *   ③ AIシフト生成: Claude API → シフト出力シート
- *   ④ 確定シフト反映: チェック済み行 → kintone 212 + Google Calendar
- *   ⑤ 月データ読込: 年月セレクターの値でkintoneからデータを両シートに表示
+ * メニュー「シフト勤怠管理」(2026-07-06 簡素化):
+ *   ① スタッフマスタ同期: スタッフマスタ → 各シートのヘッダー/ドロップダウン再構築
+ *   ② AIシフト生成: Gemini → シフト出力シート
+ *   ③ 確定シフト反映: チェック済み行 → シフトデータ(正本) + Google Calendar
+ *   ④ 月データ読込: 年月セレクターの値で正本タブからデータを両シートに表示
+ *   ⚙ 初期設定 (トリガー)
  *
  * シフト出力 横型レイアウト (動的列数):
  *   Row 1: A1=年セレクター + 店舗名ヘッダー (藤沢/伊勢佐木町/新宿/工場/EC/本部オフィス/メモ)
@@ -80,17 +80,18 @@ var NON_RETAIL_STORE_ORDER = ['工場', 'EC', '本部オフィス'];
 // Menu
 // ==========================================================================
 
+// メニューは運用に必要な4項目+初期設定のみ (2026-07-06 簡素化)
+// メニューから外した関数はコードに残置 (アーカイブ):
+//   fetchWishData(希望グリッド再描画=②月データ読込と重複) / debugProperties(doPost probe/admin で代替) /
+//   renderPersonalShift_(セレクターonEdit + admin=personal で自動/代替)
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('シフト管理')
+  SpreadsheetApp.getUi().createMenu('シフト勤怠管理')
     .addItem('① スタッフマスタ同期', 'syncStaffMaster')
-    .addItem('② 希望シフト取得', 'fetchWishData')
-    .addItem('③ AIシフト生成', 'generateShift')
-    .addItem('④ 確定シフト反映', 'syncConfirmedShift')
+    .addItem('② AIシフト生成', 'generateShift')
+    .addItem('③ 確定シフト反映', 'syncConfirmedShift')
+    .addItem('④ 月データ読込 (年月セレクター連動)', 'loadMonthData')
     .addSeparator()
-    .addItem('⑤ 月データ読込 (年月セレクター連動)', 'loadMonthData')
-    .addItem('⑥ トリガー設定', 'setupTrigger')
-    .addItem('⑦ 設定状態デバッグ', 'debugProperties')
-    .addItem('⑧ 個人シフト更新', 'renderPersonalShift_')
+    .addItem('⚙ 初期設定 (トリガー)', 'setupTrigger')
     .addToUi();
 }
 
