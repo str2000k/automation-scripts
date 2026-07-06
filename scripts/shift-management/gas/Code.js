@@ -1444,6 +1444,16 @@ function syncStaffMaster() {
     // Left: 希望シフト (2列/人: 出勤+退勤), Right: 固定シフト (1列/人: 希望休)
     var wishStaffCount = updateWishSheetHeaders_(staff);
 
+    // ヘッダー再構築後、希望データから表示中の月を再描画 (デザイン・プルダウン・週末色を完全復元)
+    var wishSheet0 = sheet_(SN_WISH);
+    if (wishSheet0) {
+      var wy = String(wishSheet0.getRange(1, 1).getValue()).trim();
+      var wm = String(wishSheet0.getRange(2, 1).getValue()).trim();
+      if (wy && wm) {
+        try { loadWishSheetData_(wy, wm); } catch (we) { Logger.log('wish reload: ' + we.message); }
+      }
+    }
+
     // --- シフト出力の非営業セクション + 名前ドロップダウン更新 ---
     var outputResult = updateShiftOutputLayout_(staff);
 
@@ -1487,96 +1497,123 @@ function updateWishSheetHeaders_(staff) {
   var wishSheet = sheet_(SN_WISH);
   if (!wishSheet) return 0;
 
-  var wishStaff = staff.filter(function(s) {
-    return s['働き方'] === '希望シフト' || s['働き方'] === '混合';
-  });
-  var fixedStaff = staff.filter(function(s) {
-    return s['働き方'] === '固定シフト';
-  });
+  // 並び順 (2026-07-03 ユーザー指定):
+  //   左 = 営業店舗スタッフの希望ペア → 固定シフト組(希望休) → 工場など非営業の希望ペア(牧田等)
+  var isWish = function(s) { return s['働き方'] === '希望シフト' || s['働き方'] === '混合'; };
+  var retailWish = staff.filter(function(s) { return isWish(s) && !!RETAIL_COLS[s['メイン店舗']]; });
+  var nonRetailWish = staff.filter(function(s) { return isWish(s) && !RETAIL_COLS[s['メイン店舗']]; });
+  var fixedStaff = staff.filter(function(s) { return s['働き方'] === '固定シフト'; });
 
-  var nWish = wishStaff.length;
+  // ブロック列定義: [ {name, type:'pair'|'single'} ... ]
+  var blocks = [];
+  retailWish.forEach(function(s) { blocks.push({ name: s['氏名'], type: 'pair' }); });
+  fixedStaff.forEach(function(s) { blocks.push({ name: s['氏名'], type: 'single' }); });
+  nonRetailWish.forEach(function(s) { blocks.push({ name: s['氏名'], type: 'pair' }); });
+
+  var totalDataCols = 0;
+  blocks.forEach(function(b) { totalDataCols += (b.type === 'pair') ? 2 : 1; });
+  var totalCols = 2 + totalDataCols; // A,B + data
+  var nWish = retailWish.length + nonRetailWish.length;
   var nFixed = fixedStaff.length;
-  var wishColCount = nWish * 2;           // 出勤+退勤で2列/人
-  var totalDataCols = wishColCount + nFixed;
-  var totalCols = 2 + totalDataCols;      // A,B + data
 
-  // -- Step 1: Row 2 全体をリセット (breakApart → clearContent) --
-  var currentLastCol = wishSheet.getLastColumn();
-  var clearWidth = Math.max(currentLastCol, totalCols);
-  if (clearWidth > 2) {
-    var r2range = wishSheet.getRange(2, 3, 1, clearWidth - 2);
-    r2range.breakApart();
-    r2range.clearContent();
-    r2range.clearFormat();
-    var r3range = wishSheet.getRange(3, 3, 1, clearWidth - 2);
-    r3range.clearContent();
-    r3range.clearFormat();
+  // -- Step 1: ヘッダー行(2-3)を全幅リセット + 増減で余った旧列のデータ領域も掃除 (冪等・崩れ根絶) --
+  var maxCol = wishSheet.getMaxColumns();
+  if (maxCol > 2) {
+    var r23 = wishSheet.getRange(2, 3, 2, maxCol - 2);
+    r23.breakApart();
+    r23.clearContent();
+    r23.clearFormat();
+  }
+  if (maxCol > totalCols) {
+    // 余剰列: データ領域の値・プルダウン・背景を除去
+    var stale = wishSheet.getRange(4, totalCols + 1, 31, maxCol - totalCols);
+    stale.clearContent();
+    stale.clearDataValidations();
+    stale.setBackground(null);
   }
 
-  // -- Step 2: Row 2 の値を構築 --
+  // -- Step 2-3: Row2(名前) / Row3(サブヘッダー) を構築 --
   var row2vals = [];
-  for (var i = 0; i < nWish; i++) {
-    row2vals.push(wishStaff[i]['氏名']);
-    row2vals.push('');
-  }
-  for (var i = 0; i < nFixed; i++) {
-    row2vals.push(fixedStaff[i]['氏名']);
-  }
-
-  // -- Step 3: Row 3 の値を構築 --
   var row3vals = [];
-  for (var i = 0; i < nWish; i++) {
-    row3vals.push('出勤');
-    row3vals.push('退勤');
-  }
-  for (var i = 0; i < nFixed; i++) {
-    row3vals.push('希望休');
-  }
-
-  // -- Step 4: 値を書き込み --
+  blocks.forEach(function(b) {
+    if (b.type === 'pair') {
+      row2vals.push(b.name, '');
+      row3vals.push('出勤', '退勤');
+    } else {
+      row2vals.push(b.name);
+      row3vals.push('希望休');
+    }
+  });
   if (row2vals.length > 0) {
     wishSheet.getRange(2, 3, 1, row2vals.length).setValues([row2vals]);
-  }
-  if (row3vals.length > 0) {
     wishSheet.getRange(3, 3, 1, row3vals.length).setValues([row3vals]);
   }
 
-  // -- Step 5: 希望シフトスタッフの2列結合 --
-  for (var i = 0; i < nWish; i++) {
-    var col = 3 + i * 2; // 1-indexed
-    wishSheet.getRange(2, col, 1, 2).merge();
-  }
+  // -- Step 4: ペアの2列結合 --
+  var col = 3;
+  blocks.forEach(function(b) {
+    if (b.type === 'pair') {
+      wishSheet.getRange(2, col, 1, 2).merge();
+      col += 2;
+    } else {
+      col += 1;
+    }
+  });
 
-  // -- Step 6: A2:B2, A3:B3 を書き込み (固定列ラベル) --
+  // -- Step 5: 固定ラベルとセレクター装飾 --
   wishSheet.getRange(2, 1).setValue('');
   wishSheet.getRange(2, 2).setValue('');
   wishSheet.getRange(3, 1).setValue('日付');
   wishSheet.getRange(3, 2).setValue('曜日');
+  wishSheet.getRange(1, 1, 2, 1).setBackground('#F6B26B').setFontWeight('bold').setHorizontalAlignment('center');
 
-  // -- Step 7: スタイリング --
-  // Row 2 全体: 中央揃え、太字
-  var row2all = wishSheet.getRange(2, 1, 1, totalCols);
-  row2all.setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setFontSize(10);
-
-  // Row 2 A:B を青ヘッダー
+  // -- Step 6: スタイリング (他シートと統一の配色) --
+  wishSheet.getRange(2, 1, 1, totalCols)
+    .setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setFontSize(10);
   wishSheet.getRange(2, 1, 1, 2).setBackground('#D9EBF7');
-
-  // Row 2 希望シフト部分 (C〜): 青
-  if (wishColCount > 0) {
-    wishSheet.getRange(2, 3, 1, wishColCount).setBackground('#D9EBF7');
-  }
-
-  // Row 2 固定シフト部分: 緑
-  if (nFixed > 0) {
-    wishSheet.getRange(2, 3 + wishColCount, 1, nFixed).setBackground('#D9EAD3');
-  }
-
-  // Row 3: グレー、太字、中央
+  // ブロック別の背景: 営業ペア=青 / 固定=緑 / 非営業ペア=黄
+  col = 3;
+  blocks.forEach(function(b) {
+    var w = (b.type === 'pair') ? 2 : 1;
+    var idx = blocks.indexOf(b);
+    var isRetailPair = idx < retailWish.length;
+    var bg = (b.type === 'single') ? '#D9EAD3' : (isRetailPair ? '#D9EBF7' : '#FCE8B2');
+    wishSheet.getRange(2, col, 1, w).setBackground(bg);
+    col += w;
+  });
   wishSheet.getRange(3, 1, 1, totalCols)
     .setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
     .setFontSize(8).setBackground('#E8EAED');
 
-  Logger.log('updateWishSheetHeaders_: wish=' + nWish + ', fixed=' + nFixed + ', totalCols=' + totalCols);
+  // -- Step 7: セル幅・固定表示・ブロック区切り罫線 --
+  try {
+    wishSheet.setColumnWidth(1, 52);  // 日付
+    wishSheet.setColumnWidth(2, 40);  // 曜日
+    col = 3;
+    blocks.forEach(function(b) {
+      if (b.type === 'pair') {
+        wishSheet.setColumnWidth(col, 64);
+        wishSheet.setColumnWidth(col + 1, 64);
+        col += 2;
+      } else {
+        wishSheet.setColumnWidth(col, 88);
+        col += 1;
+      }
+    });
+    wishSheet.setFrozenRows(3);
+    wishSheet.setFrozenColumns(2);
+  } catch (e) { Logger.log('wish width: ' + e.message); }
+
+  // ブロック右端に区切り罫線 (ヘッダー+データ領域)
+  col = 3;
+  blocks.forEach(function(b) {
+    var w = (b.type === 'pair') ? 2 : 1;
+    wishSheet.getRange(2, col + w - 1, 33, 1)
+      .setBorder(null, null, null, true, null, null, '#9AA0A6', SpreadsheetApp.BorderStyle.SOLID);
+    col += w;
+  });
+
+  Logger.log('updateWishSheetHeaders_: retail=' + retailWish.length + ', fixed=' + nFixed + ', nonRetail=' + nonRetailWish.length + ', totalCols=' + totalCols);
   return nWish + nFixed;
 }
 
@@ -3894,8 +3931,8 @@ function renderPersonalShift_() {
   sh.getRange(PERSONAL_HEADER_ROW, 1, 1, 5)
     .setValues([['日付', '曜日', '店舗', '時間', '勤怠']])
     .setFontWeight('bold')
-    .setBackground('#3D4A5C')
-    .setFontColor('#FFFFFF')
+    .setBackground('#D9EBF7')
+    .setFontColor('#202124')
     .setHorizontalAlignment('center');
   // 過去の描画残骸も含めて広めにクリア (F列の迷いテキスト等)
   sh.getRange(PERSONAL_HEADER_ROW + 1, 1, 40, 8)
@@ -3911,7 +3948,7 @@ function renderPersonalShift_() {
     var dow = DOW_JP[d.getDay()];
     var dayShifts = byDate[dateStr] || [];
     var work = dayShifts.filter(function(r) { return r.shift_status === '出勤'; });
-    var bg = (d.getDay() === 0) ? '#FCE8E6' : (d.getDay() === 6) ? '#E8F0FE' : '#FFFFFF';
+    var bg = (d.getDay() === 0) ? '#F4C7C3' : (d.getDay() === 6) ? '#B4D7F0' : '#FFFFFF';
 
     var kint = kintaiByDate[dateStr] || '';
     if (kint.indexOf('遅刻') >= 0) {
@@ -3943,7 +3980,7 @@ function renderPersonalShift_() {
   sh.getRange(PERSONAL_HEADER_ROW + 1 + rows.length, 1, 1, 5)
     .setValues([['出勤日数', String(workDays) + '日', '遅刻', lateCount + '回 / ' + lateMin + '分', '']])
     .setFontWeight('bold')
-    .setBackground('#F1F3F4');
+    .setBackground('#E8EAED');
 }
 
 // 個人シフトシートの初期構築 (存在しなければ作成、ユーザー設計のセレクター配置)
@@ -3984,11 +4021,11 @@ function ensurePersonalSheet_() {
 
   // 列幅
   try {
-    sh.setColumnWidth(1, 70);   // 日付
-    sh.setColumnWidth(2, 48);   // 曜日
-    sh.setColumnWidth(3, 130);  // 店舗
-    sh.setColumnWidth(4, 150);  // 時間
-    sh.setColumnWidth(5, 130);  // 勤怠
+    sh.setColumnWidth(1, 56);   // 日付
+    sh.setColumnWidth(2, 40);   // 曜日
+    sh.setColumnWidth(3, 110);  // 店舗
+    sh.setColumnWidth(4, 140);  // 時間
+    sh.setColumnWidth(5, 120);  // 勤怠
   } catch (e) {}
   return sh;
 }
