@@ -84,10 +84,8 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 
 - [ ] launchd 4本の停止（`com.s.shift-*`。ユーザーの通常ターミナルで bootout 実行が必要 — hook制約。
       4本とも archive 移動済みスクリプトを指しており全て起動失敗中。特に bolt-server は KeepAlive で失敗ループ）
-- [ ] Cloud Run `shift-bolt-server` サービスの削除（project `thermal-circle-488006-b8`・設定バックアップ済み: `archive/cloud-run/shift-bolt-server_backup_20260706.yaml`）。
-      **前提**: Slackアプリ A0AG9QRBLGH の Event Subscriptions が旧Cloud Runを向いたまま生きている（2026-07-06時点で /slack/events に実トラフィック確認）。
-      v2はEvents API不使用 → 先に api.slack.com/apps/A0AG9QRBLGH/event-subscriptions で **Enable Events を Off** にしてから削除する。
-      ※同プロジェクトの `airregi-webhook` は別機能で現役。**絶対に触らない**
+- [x] Cloud Run `shift-bolt-server` 削除済み（2026-07-06。Slack Event Subscriptions Off →削除→ airregi-webhook のみ残存を確認。
+      設定バックアップ: `archive/cloud-run/shift-bolt-server_backup_20260706.yaml`）
 - [x] kintone 211/212/213 の運用停止（2026-07-06: 「【退役】」リネーム+説明にバックアップ所在を記載・deploy済み。
       アプリ自体の削除は管理画面GUIのみ可 → 任意・要ユーザー判断）
 - [ ] AIシフト生成の精度検証・調整（後回し中）
