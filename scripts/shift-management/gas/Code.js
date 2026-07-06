@@ -1560,17 +1560,13 @@ function updateWishSheetHeaders_(staff) {
     }
   });
 
-  // -- Step 5: 固定ラベルとセレクター装飾 --
-  wishSheet.getRange(2, 1).setValue('');
-  wishSheet.getRange(2, 2).setValue('');
+  // -- Step 5: 固定ラベル (A2=月セレクター値は消さない) --
   wishSheet.getRange(3, 1).setValue('日付');
   wishSheet.getRange(3, 2).setValue('曜日');
-  wishSheet.getRange(1, 1, 2, 1).setBackground('#F6B26B').setFontWeight('bold').setHorizontalAlignment('center');
 
   // -- Step 6: スタイリング (他シートと統一の配色) --
-  wishSheet.getRange(2, 1, 1, totalCols)
+  wishSheet.getRange(2, 3, 1, Math.max(1, totalCols - 2))
     .setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setFontSize(10);
-  wishSheet.getRange(2, 1, 1, 2).setBackground('#D9EBF7');
   // ブロック別の背景: 営業ペア=青 / 固定=緑 / 非営業ペア=黄
   col = 3;
   blocks.forEach(function(b) {
@@ -1585,9 +1581,14 @@ function updateWishSheetHeaders_(staff) {
     .setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
     .setFontSize(8).setBackground('#E8EAED');
 
+  // 年月セレクター統一デザイン (行2/3の塗りより後に適用して上書きを防ぐ)
+  // 旧レイアウトの A1:B1 / A2:B2 結合を解除 (結合中はB列ラベルが書けない)
+  wishSheet.getRange(1, 1, 2, 2).breakApart();
+  styleYmSelector_(wishSheet, 2);
+
   // -- Step 7: セル幅・固定表示・ブロック区切り罫線 --
   try {
-    wishSheet.setColumnWidth(1, 52);  // 日付
+    wishSheet.setColumnWidth(1, 56);  // 日付 (年セレクター14ptが収まる幅)
     wishSheet.setColumnWidth(2, 40);  // 曜日
     col = 3;
     blocks.forEach(function(b) {
@@ -1625,6 +1626,21 @@ function updateWishSheetHeaders_(staff) {
  * シフト出力シートの非営業セクションを再構築し、名前ドロップダウンを更新する。
  * ① syncStaffMaster から呼ばれる。
  */
+// 年月セレクターの統一デザイン (3シート共通: シフト作成の濃オレンジが正)
+// A1=年値 / A2=月値、labelCol に「年」「月」ラベル (シフト作成=C列、希望シフト・個人シフト=B列)
+function styleYmSelector_(sh, labelCol) {
+  sh.getRange(1, 1, 2, 1)
+    .setBackground('#F2A500').setFontWeight('bold').setFontSize(14)
+    .setHorizontalAlignment('center').setVerticalAlignment('middle');
+  if (labelCol) {
+    sh.getRange(1, labelCol).setValue('年');
+    sh.getRange(2, labelCol).setValue('月');
+    sh.getRange(1, labelCol, 2, 1)
+      .setBackground('#F2A500').setFontWeight('bold').setFontSize(11)
+      .setHorizontalAlignment('center').setVerticalAlignment('middle');
+  }
+}
+
 function updateShiftOutputLayout_(staff) {
   var outputSheet = sheet_(SN_OUTPUT);
   if (!outputSheet) return { message: 'シート未検出' };
@@ -1710,6 +1726,8 @@ function updateShiftOutputLayout_(staff) {
       }
     }
   }
+
+  styleYmSelector_(outputSheet, 3);
 
   var personCount = newLayout.allPersonCols.length;
   Logger.log('updateShiftOutputLayout_: ' + newLayout.storeOrder.length + ' stores, '
@@ -4080,10 +4098,9 @@ function ensurePersonalSheet_() {
   sh.getRange(2, 3).setDataValidation(
     SpreadsheetApp.newDataValidation().requireValueInList(names, true).setAllowInvalid(true).build());
 
-  // セレクターの見た目 (シフト作成の年月セレクターと同じオレンジ系)
-  sh.getRange(1, 1, 2, 1).setBackground('#F6B26B').setFontWeight('bold').setHorizontalAlignment('center');
+  // セレクターの見た目 (3シート共通デザイン)
+  styleYmSelector_(sh, 2);
   sh.getRange(2, 3).setBackground('#FFF2CC').setFontWeight('bold');
-  sh.getRange(1, 2, 2, 1).setFontWeight('bold');
   sh.getRange(1, 3).setFontWeight('bold');
 
   // 列幅
