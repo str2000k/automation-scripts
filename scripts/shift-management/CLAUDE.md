@@ -54,8 +54,8 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 ## 5. 業務フロー
 
 1. **希望収集**: 毎月1日/15日に dailyShiftReminder が対象期間のDM送信（✅出勤/🙏休み希望ボタン）→ doPost → 希望データ＋グリッド即反映。管理者はグリッド直接編集も可（onEditで正本に同期）
-2. **生成**: メニュー② → 期間ダイアログ → Gemini生成（検証NG時は最大3回再生成）→ シフト出力に書き込み
-3. **確定**: 出力シートで修正 → A列「確定」チェック → ③ → シフトデータ（正本）＋カレンダー同期
+2. **生成**: メニュー②AIシフト生成 → 期間ダイアログ → Gemini生成（検証NG時は最大3回再生成）→ シフト出力に書き込み
+3. **確定**: 出力シートで修正 → A列「確定」チェック → ③Googleカレンダー反映 → シフトデータ（正本）＋カレンダー同期
 4. **勤怠（新機能）**: attendanceCron が出勤60分前に #3002-直営共有-勤怠管理 へメンション付き出勤確認を投稿（🟢通常出勤/🕐遅刻→5分刻みドロップダウンで分数選択。本人と管理者のみ操作可・2026-07-06にDM方式から変更）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で同チャンネルにアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
 
 ## 6. Script Properties（必須キー）
@@ -92,6 +92,6 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
       admin=calsync でイベント作成→内容確認→caldel 掃除まで一次情報で確認）
 - [x] 勤怠DMフローの実地検証（2026-07-06: テストシフト行→cron実発火→DM実受信→勤怠タブ記録→
       att_okボタン応答記録まで全経路確認。テストデータは掃除済み）
-- [x] メニュー簡素化（2026-07-06: 「シフト勤怠管理」①同期/②生成/③確定 の3項目のみに（月読込=onEdit自動、トリガー=admin=triggersで復旧可のため除外）。
+- [x] メニュー簡素化（2026-07-06: 「シフト勤怠管理」①マスタ反映/②AIシフト生成/③Googleカレンダー反映 の3項目のみに（月読込=onEdit自動、トリガー=admin=triggersで復旧可のため除外）。
       外した loadMonthData/fetchWishData/debugProperties/renderPersonalShift_/setupTrigger はコードに残置・admin アクションで代替可）
 - [ ] ヘッダ保護（任意）

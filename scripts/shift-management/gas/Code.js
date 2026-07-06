@@ -4,9 +4,9 @@
  * スプレッドシート「シフト勤怠管理」: 1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU
  *
  * メニュー「シフト勤怠管理」(2026-07-06 簡素化):
- *   ① スタッフマスタ同期: スタッフマスタ → 各シートのヘッダー/ドロップダウン再構築
+ *   ① マスタ反映: スタッフマスタ → 各シートのヘッダー/ドロップダウン再構築
  *   ② AIシフト生成: Gemini → シフト出力シート
- *   ③ 確定シフト反映: チェック済み行 → シフトデータ(正本) + Google Calendar
+ *   ③ Googleカレンダー反映: チェック済み行 → シフトデータ(正本) + Google Calendar
  *   ※月データ読込は年月セレクター変更のonEditで自動実行 (手動: admin=reload)
  *   ※トリガー復旧は admin=triggers (onEditは主要関数のensureTrigger_でも自己修復)
  *
@@ -88,9 +88,9 @@ var NON_RETAIL_STORE_ORDER = ['工場', 'EC', '本部オフィス'];
 //   setupTrigger(onEditは主要関数のensureTrigger_で自己修復・全復旧は admin=triggers)
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('シフト勤怠管理')
-    .addItem('① スタッフマスタ同期', 'syncStaffMaster')
+    .addItem('① マスタ反映', 'syncStaffMaster')
     .addItem('② AIシフト生成', 'generateShift')
-    .addItem('③ 確定シフト反映', 'syncConfirmedShift')
+    .addItem('③ Googleカレンダー反映', 'syncConfirmedShift')
     .addToUi();
 }
 
