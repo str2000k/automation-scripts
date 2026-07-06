@@ -1,4 +1,4 @@
-# シフト労務管理システム v2 - ガードレール & ルール
+# シフト勤怠管理システム v2 - ガードレール & ルール
 
 **2026-07-03 全面刷新**: kintone/Cloud Run/Python パイプラインを全廃し、
 **Slack（入力・通知） + Googleスプレッドシート（正本） + Googleカレンダー（共有）** の3点構成に再構築。
@@ -8,7 +8,7 @@
 
 | 役割 | 実体 |
 |---|---|
-| 正本（データ） | スプレッドシート「シフト労務管理」`1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU` |
+| 正本（データ） | スプレッドシート「シフト勤怠管理」`1JlyWngnuha1IHQLMGs5bzTnjct8s7eY4Z-bW0YHIlmU`（旧名「シフト労務管理」2026-07-06リネーム・ID不変） |
 | 頭脳 | GAS「シフト管理GAS」Script ID `1RWVWISiDyypxfSCviSOovv2vDbdmIgfwKx25YGASsjVCxd6zIScZVewf`（このリポジトリの `gas/Code.js` が正） |
 | Slack受け口 | GAS Web App（doPost）。Slackアプリ「勤怠管理」A0AG9QRBLGH の Interactivity Request URL が向く |
 | AI生成 | Gemini `gemini-2.5-flash`（専用GCPプロジェクト `shift-mgmt-gemini-26`・無料枠・キーは Script Properties `GEMINI_API_KEY`） |
