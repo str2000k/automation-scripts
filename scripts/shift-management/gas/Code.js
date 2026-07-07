@@ -3590,6 +3590,16 @@ function doPost(e) {
         }], cd.slice(0, 4), e.parameter.deleteold === '1');
         return ContentService.createTextOutput('calsync ok: created=' + cres.created + ' deleted=' + cres.deleted);
       }
+      if (act === 'wishdm') {
+        // 希望収集DMの再送 (全スタッフ・Slack ID保有者のみ)
+        var wps = e.parameter.start || '', wpe = e.parameter.end || '';
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(wps) || !/^\d{4}-\d{2}-\d{2}$/.test(wpe)) {
+          return ContentService.createTextOutput('start/end required (YYYY-MM-DD)');
+        }
+        var wdl = e.parameter.deadline || '';
+        var wn = sendShiftCollectionDMs_(readStaffMaster_(), wps, wpe, wdl);
+        return ContentService.createTextOutput('wishdm ok: ' + wn + '件送信 (' + wps + '〜' + wpe + ' 締切' + wdl + ')');
+      }
       if (act === 'triggers') {
         // 復旧用: 3トリガー (onEdit/勤怠cron/希望リマインド) を未設定なら作成
         var t1 = ensureTrigger_();
