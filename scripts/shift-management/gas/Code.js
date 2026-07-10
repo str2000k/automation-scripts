@@ -3554,7 +3554,7 @@ function doPost(e) {
         return ContentService.createTextOutput('personal ok');
       }
       if (act === 'setprop') {
-        var allowed = { 'GEMINI_API_KEY': 1, 'ATTEND_NOTIFY_MIN': 1, 'ATTEND_RENOTIFY_MIN': 1 };
+        var allowed = { 'GEMINI_API_KEY': 1, 'ATTEND_NOTIFY_MIN': 1, 'ATTEND_RENOTIFY_MIN': 1, 'ATTEND_ENABLED': 1 };
         var k = e.parameter.propkey || '';
         if (!allowed[k]) return ContentService.createTextOutput('prop not allowed');
         PropertiesService.getScriptProperties().setProperty(k, e.parameter.propvalue || '');
@@ -3601,7 +3601,7 @@ function doPost(e) {
         return ContentService.createTextOutput('wishdm ok: ' + wn + '件送信 (' + wps + '〜' + wpe + ' 締切' + wdl + ')');
       }
       if (act === 'triggers') {
-        // 復旧用: 3トリガー (onEdit/勤怠cron/希望リマインド) を未設定なら作成
+        // 復旧用: 4トリガー (onEdit/勤怠cron/希望リマインド/繋ぎ同期) を未設定なら作成
         var t1 = ensureTrigger_();
         var t2 = ensureAttendanceTrigger_();
         var t3 = false;
@@ -3612,8 +3612,34 @@ function doPost(e) {
           ScriptApp.newTrigger('dailyShiftReminder').timeBased().everyDays(1).atHour(9).create();
           t3 = true;
         }
+        var t4 = ensureLegacySyncTrigger_();
         return ContentService.createTextOutput('triggers ok: onEdit=' + (t1 ? '作成' : '既存')
-          + ' attendanceCron=' + (t2 ? '作成' : '既存') + ' dailyReminder=' + (t3 ? '作成' : '既存'));
+          + ' attendanceCron=' + (t2 ? '作成' : '既存') + ' dailyReminder=' + (t3 ? '作成' : '既存')
+          + ' legacySync=' + (t4 ? '作成' : '既存'));
+      }
+      if (act === 'legacydebug') {
+        var dss = SpreadsheetApp.openById(LEGACY_SS_ID);
+        var dnow = new Date();
+        var dname = dnow.getFullYear() + '/' + pad2(dnow.getMonth() + 1);
+        var dsh = dss.getSheetByName(dname);
+        if (!dsh) return ContentService.createTextOutput('tab not found: ' + dname);
+        var dv = dsh.getDataRange().getDisplayValues();
+        var dres = legacyNameResolver_();
+        var dinfo = {
+          tab: dname, rows: dv.length, cols: dv[0].length,
+          r1: dv[0].slice(0, 40), r2: dv[1].slice(0, 40),
+          r4_head: dv[3].slice(0, 30),
+          resolve_test: ['モブ', '椿', '智', '稜也', '稲垣', 'ラスノブ'].map(function(n) {
+            var h = dres(legacyCleanName_(n));
+            return n + '=' + (h ? h.sid : 'NG');
+          }),
+        };
+        return ContentService.createTextOutput(JSON.stringify(dinfo));
+      }
+      if (act === 'legacysync') {
+        var lres = legacyShiftSync();
+        var lt = ensureLegacySyncTrigger_();
+        return ContentService.createTextOutput('legacysync ok: ' + lres + (lt ? ' [15分毎トリガー新規作成]' : ''));
       }
       if (act === 'caldel') {
         // 検証用: 指定日の [shift-sync] イベントを全店舗分削除
@@ -3890,6 +3916,7 @@ function kintaiRespond_(dateStr, staffId, response, lateMinutes) {
  *  - 出勤時刻経過: 未応答なら同チャンネルへアラート
  */
 function attendanceCron() {
+  if (getProp_('ATTEND_ENABLED') === '0') return; // 一時停止スイッチ (admin=setprop で切替)
   var tz = Session.getScriptTimeZone();
   var now = new Date();
   var today = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
@@ -3984,6 +4011,220 @@ function ensureAttendanceTrigger_() {
     if (triggers[i].getHandlerFunction() === 'attendanceCron') return false;
   }
   ScriptApp.newTrigger('attendanceCron').timeBased().everyMinutes(10).create();
+  return true;
+}
+
+// --------------------------------------------------------------------------
+// 3.5) 繋ぎ同期: 現行スプシ「2026店舗シフト」→ シフトデータ正本 (本番移行までの暫定機能)
+//   レイアウト: 左ブロック=店舗×早番/遅番の担当者名 / 右ブロック=スタッフ別の勤務時間
+//   店舗は左ブロック優先 (いなければ右ブロックの所属グループ)、名前はニックネーム解決
+// --------------------------------------------------------------------------
+
+var LEGACY_SS_ID = '14g75SYgDPTtXXLq8CgGqAYtmp9hCP_jMHS-vOO_NK5Y';
+var LEGACY_STORE_MAP = { '藤沢': '藤沢', '伊勢佐木': '伊勢佐木町', '伊勢佐木町': '伊勢佐木町', '新宿': '新宿', '工場': '工場', '本部': '本部オフィス' };
+
+// 15分毎トリガー: 当月+翌月タブを同期
+function legacyShiftSync() {
+  var now = new Date();
+  var results = [];
+  var warns = [];
+  [0, 1].forEach(function(offset) {
+    var y = now.getFullYear(), m = now.getMonth() + 1 + offset;
+    if (m > 12) { m -= 12; y += 1; }
+    try {
+      var r = legacySyncMonth_(y, m, warns);
+      if (r) results.push(y + '/' + pad2(m) + ': ' + r);
+    } catch (e) {
+      results.push(y + '/' + pad2(m) + ': ERROR ' + e.message);
+      slackError_('legacyShiftSync', y + '/' + m + ': ' + e.message);
+    }
+  });
+  legacyWarnUnresolved_(warns);
+  var summary = results.join(' / ') || 'no tabs';
+  Logger.log('legacyShiftSync: ' + summary);
+  return summary;
+}
+
+function legacySyncMonth_(year, month, warns) {
+  var ss = SpreadsheetApp.openById(LEGACY_SS_ID);
+  var sh = ss.getSheetByName(year + '/' + pad2(month)) || ss.getSheetByName(year + '/' + month);
+  if (!sh) return null;
+  // 表示値で読む (日付セルはDateオブジェクトでなく「7/1」等の表示文字列で扱う)
+  var vals = sh.getDataRange().getDisplayValues();
+  if (vals.length < 4) return null;
+  var r1 = vals[0], r2 = vals[1];
+
+  // メモ列 = 右ブロック終端 (以降は固定シフトのメモ表なので無視)
+  var limit = r1.length;
+  for (var c = 0; c < r1.length; c++) {
+    if (String(r1[c]).trim() === 'メモ') { limit = c; break; }
+  }
+
+  // r1 の店舗ヘッダー位置 (列→直近左の店舗)
+  var storeAt = [];
+  for (var c = 0; c < limit; c++) {
+    var st = LEGACY_STORE_MAP[String(r1[c]).trim()];
+    if (st) storeAt.push({ col: c, store: st });
+  }
+  function storeOfCol(col) {
+    var st = '';
+    for (var i = 0; i < storeAt.length; i++) if (storeAt[i].col <= col) st = storeAt[i].store;
+    return st;
+  }
+
+  // 右ブロック: r2 が早番/遅番以外の名前ならスタッフ時間列
+  var resolver = legacyNameResolver_();
+  var staffCols = [];
+  for (var c = 4; c < limit; c++) {
+    var nm = legacyCleanName_(r2[c]);
+    if (!nm || nm === '早番' || nm === '遅番') continue;
+    var hit = resolver(nm);
+    if (!hit) { if (warns.indexOf(nm) < 0) warns.push(nm); continue; }
+    staffCols.push({ col: c, sid: hit.sid, name: hit.name, home: storeOfCol(c) });
+  }
+  var firstStaffCol = staffCols.length ? staffCols[0].col : limit;
+
+  var mm = pad2(month);
+  var lastDay = new Date(year, month, 0).getDate();
+  var pStart = year + '-' + mm + '-01';
+  var pEnd = year + '-' + mm + '-' + pad2(lastDay);
+
+  var recs = [];
+  for (var r = 3; r < vals.length; r++) {
+    var dm = String(vals[r][2]).trim().match(/^(\d{1,2})\/(\d{1,2})$/);
+    if (!dm || parseInt(dm[1], 10) !== month) continue;
+    var confirmed = vals[r][0];
+    if (!(confirmed === true || String(confirmed).toUpperCase() === 'TRUE')) continue;
+    var dateStr = year + '-' + mm + '-' + pad2(parseInt(dm[2], 10));
+
+    // 左ブロック: その日の担当 (sid → 実際の勤務店舗)
+    var assign = {};
+    for (var c = 4; c < firstStaffCol; c++) {
+      var nm2 = legacyCleanName_(vals[r][c]);
+      if (!nm2) continue;
+      var hit2 = resolver(nm2);
+      if (!hit2) { if (warns.indexOf(nm2) < 0) warns.push(nm2); continue; }
+      if (!assign[hit2.sid]) assign[hit2.sid] = storeOfCol(c);
+    }
+
+    // 右ブロック: 時間があるスタッフ (店舗=左ブロック優先)
+    var seen = {};
+    staffCols.forEach(function(sc) {
+      var t = legacyParseTime_(vals[r][sc.col]);
+      if (!t) return;
+      recs.push({ date: dateStr, sid: sc.sid, name: sc.name,
+                  store: assign[sc.sid] || sc.home, start: t.start, end: t.end });
+      seen[sc.sid] = true;
+    });
+    // 左ブロックにいるが時間未記入のスタッフも出勤として記録 (時間は空)
+    staffCols.forEach(function(sc) {
+      if (seen[sc.sid] || !assign[sc.sid]) return;
+      recs.push({ date: dateStr, sid: sc.sid, name: sc.name,
+                  store: assign[sc.sid], start: '', end: '' });
+      seen[sc.sid] = true;
+    });
+  }
+
+  if (!recs.length) {
+    // パース失敗による全消し事故ガード: 既存があるのに0件なら書き換えない
+    if (readShiftDataRange_(pStart, pEnd).length) return 'skip(0件パース・既存保持)';
+    return '0件';
+  }
+
+  // 差分がなければ何もしない
+  var existing = readShiftDataRange_(pStart, pEnd);
+  var newKeys = recs.map(function(o) { return [o.date, o.sid, o.store, o.start, o.end].join('|'); }).sort().join('\n');
+  var oldKeys = existing.map(function(o) { return [o.date, o.staff_id, o.store, o.start_time, o.end_time].join('|'); }).sort().join('\n');
+  if (newKeys === oldKeys) return '変更なし(' + recs.length + '件)';
+
+  // 月全体を入替 (delete → append)
+  var dates = [];
+  for (var d = 1; d <= lastDay; d++) dates.push(year + '-' + mm + '-' + pad2(d));
+  deleteShiftDataRows_(dates);
+  var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  var out = recs.map(function(o) {
+    return [o.date, o.sid, o.name, '出勤', o.store, o.start, o.end, pStart, pEnd, 'legacy-sync', nowStr];
+  });
+  var dataSh = shiftDataSheet_();
+  dataSh.getRange(dataSh.getLastRow() + 1, 1, out.length, SHIFT_DATA_HEADERS.length).setValues(out);
+
+  // 表示中の月なら再描画
+  try {
+    var outSheet = sheet_(SN_OUTPUT);
+    if (outSheet && String(outSheet.getRange(1, 1).getValue()).trim() === String(year)
+        && String(outSheet.getRange(2, 1).getValue()).trim() === String(month)) {
+      loadShiftOutputData_(String(year), String(month));
+    }
+    var pSheet = sheet_(SN_PERSONAL);
+    if (pSheet && String(pSheet.getRange(1, 1).getValue()).trim() === String(year)
+        && String(pSheet.getRange(2, 1).getValue()).trim() === String(month)) {
+      renderPersonalShift_();
+    }
+  } catch (e) { Logger.log('legacy rerender: ' + e.message); }
+
+  return recs.length + '件同期';
+}
+
+// 名前セルの掃除 (👑や記号・空白を除去して日本語文字のみ残す)
+function legacyCleanName_(v) {
+  return String(v || '').replace(/[^぀-ヿ一-鿿ｦ-ﾟ々ー]/g, '');
+}
+
+// ニックネーム → スタッフ解決 (①ニックネーム列一致 ②氏名一致 ③前方一致 ④部分一致が一意)
+function legacyNameResolver_() {
+  var staff = readStaffMaster_();
+  var cache = {};
+  return function(nick) {
+    if (cache.hasOwnProperty(nick)) return cache[nick];
+    var hit = null;
+    for (var i = 0; i < staff.length; i++) {
+      if (legacyCleanName_(staff[i]['ニックネーム'] || '') === nick) { hit = staff[i]; break; }
+    }
+    if (!hit) for (var j = 0; j < staff.length; j++) {
+      if (staff[j]['氏名'] === nick) { hit = staff[j]; break; }
+    }
+    if (!hit) {
+      var pre = staff.filter(function(s) { return s['氏名'].indexOf(nick) === 0; });
+      if (pre.length === 1) hit = pre[0];
+    }
+    if (!hit) {
+      var inc = staff.filter(function(s) { return s['氏名'].indexOf(nick) >= 0; });
+      if (inc.length === 1) hit = inc[0];
+    }
+    cache[nick] = hit ? { sid: hit['staff_id'], name: hit['氏名'] } : null;
+    return cache[nick];
+  };
+}
+
+// 時間パース: "14:30-23:30" "11-20" "12-" 等 (区切りは -〜～ー)
+function legacyParseTime_(v) {
+  var s = String(v || '').trim().replace(/[〜～ー]/g, '-').replace(/\s+/g, '');
+  var m = s.match(/^(\d{1,2})(?::(\d{2}))?-(?:(\d{1,2})(?::(\d{2}))?)?$/);
+  if (!m) return null;
+  return {
+    start: parseInt(m[1], 10) + ':' + (m[2] || '00'),
+    end: m[3] ? (parseInt(m[3], 10) + ':' + (m[4] || '00')) : '',
+  };
+}
+
+// 未解決名の警告 (同じ内容は1回だけ通知)
+function legacyWarnUnresolved_(warns) {
+  if (!warns.length) return;
+  warns.sort();
+  var key = warns.join(',');
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('LEGACY_WARNED') === key) return;
+  props.setProperty('LEGACY_WARNED', key);
+  slackPost_('⚠ *繋ぎ同期* スタッフマスタで解決できない名前: ' + warns.join(', ')
+    + '\nS タブに追加するか、ニックネーム列に記入してください（解決するまでこの人のシフトは同期されません）');
+}
+
+function ensureLegacySyncTrigger_() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'legacyShiftSync') return false;
+  }
+  ScriptApp.newTrigger('legacyShiftSync').timeBased().everyMinutes(15).create();
   return true;
 }
 

@@ -58,6 +58,17 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 3. **確定**: 出力シートで修正 → A列「確定」チェック → ③Googleカレンダー反映 → シフトデータ（正本）＋カレンダー同期
 4. **勤怠（新機能）**: attendanceCron が出勤60分前に #3002-直営共有-勤怠管理 へメンション付き出勤確認を投稿（🟢通常出勤/🕐遅刻→5分刻みドロップダウンで分数選択。本人と管理者のみ操作可・2026-07-06にDM方式から変更）→ 勤怠タブに記録。30分前に未応答再通知、出勤時刻超過で同チャンネルにアラート。タイミングは Script Properties `ATTEND_NOTIFY_MIN`/`ATTEND_RENOTIFY_MIN`（分）
 
+### 繋ぎ同期（本番移行までの暫定・2026-07-10追加）
+
+- 現行運用スプシ「2026店舗シフト」`14g75SYgDPTtXXLq8CgGqAYtmp9hCP_jMHS-vOO_NK5Y` の当月+翌月タブ（例 `2026/07`）を
+  **15分毎トリガー `legacyShiftSync`** がシフトデータ正本へ同期（確定=TRUE行のみ・差分なければ何もしない・0件パース時は全消しガード）
+- 店舗判定: 左ブロック（早番/遅番の担当名）優先、いなければ右ブロック（時間列）の所属グループ
+- 名前解決: S タブ「ニックネーム」列 → 氏名一致 → 前方/部分一致が一意。未解決名は Slack に1回警告
+- 手動実行/復旧: `&admin=legacysync` / 診断: `&admin=legacydebug`
+- **勤怠通知スイッチ**: Script Properties `ATTEND_ENABLED`=0 で attendanceCron 停止（未設定/1=稼働）。`admin=setprop` で切替可
+- S024稲垣/S025内田は仮登録（フルネーム・Slack ID等は要記入）
+- **本番移行時にこの機能を削除**: legacyShiftSync トリガー削除 + 関連コード除去
+
 ## 6. Script Properties（必須キー）
 
 `GEMINI_API_KEY` / `SLACK_BOT_TOKEN` / `SLACK_SHIFT_CHANNEL` / `SHIFT_CALENDAR_ID` / `WEBHOOK_TOKEN`
