@@ -75,6 +75,16 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 - S024稲垣/S025内田は仮登録（フルネーム・Slack ID等は要記入）
 - **本番移行時にこの機能を削除**: legacyShiftSync トリガー削除 + 関連コード除去
 
+## 5.5 LIFF 従業員メニューAPI（p11連携・2026-07-11追加）
+
+- 従業員LIFF（LINE公式アカウントのリッチメニュー→ chillaxy420.github.io/chillaxy-recruit-liff/staff/）から
+  シフト閲覧・希望提出・出勤確認を行うAPI。経路: LIFF → staff-BFF GAS（LINE IDトークンverify）→ 当GAS doPost `?token=&liff=<action>`
+- アクション: `whoami` / `bind`（SタブLINE UID列に紐付け・Slackに1行通知）/ `today` / `attend` / `personal` / `wishlist` / `wish`
+- 実装は Code.js 末尾の「LIFF 従業員メニューAPI」セクション（handleLiffApi_ ほか）。既存の
+  `upsertWishData_`/`kintaiRespond_`/`readShiftDataRange_` を呼ぶだけで書式は Slack フローと同一（wishのchannel='liff'）
+- **⚠ doPost内の `e.parameter.liff` 分岐とこのセクションを消すと従業員LIFFが全停止する**
+- uid→スタッフ解決は Sタブ `LINE UID` 列。staff_id はクライアントから信用しない
+
 ## 6. Script Properties（必須キー）
 
 `GEMINI_API_KEY` / `SLACK_BOT_TOKEN` / `SLACK_SHIFT_CHANNEL` / `SHIFT_CALENDAR_ID` / `WEBHOOK_TOKEN`

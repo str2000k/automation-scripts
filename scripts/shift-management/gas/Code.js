@@ -3553,6 +3553,10 @@ function doPost(e) {
     if (e.parameter && e.parameter.probe) {
       return ContentService.createTextOutput('shift-v2.1');
     }
+    // LIFF 従業員メニューAPI (p11連携・token保護下)。⚠消すと従業員LIFFが全停止
+    if (e.parameter && e.parameter.liff) {
+      return handleLiffApi_(e);
+    }
     // 管理用アクション (トークン保護下・保守/検証用)
     if (e.parameter && e.parameter.admin) {
       var act = e.parameter.admin;
@@ -4439,4 +4443,196 @@ function ensurePersonalSheet_() {
     sh.setColumnWidth(5, 120);  // 勤怠
   } catch (e) {}
   return sh;
+}
+
+
+// ==========================================================================
+// LIFF 従業員メニューAPI (p11連携・2026-07-11追加)
+//   従業員LIFF (chillaxy420.github.io/chillaxy-recruit-liff/staff/) → staff-BFF GAS → ここ
+//   ?token=WEBHOOK_TOKEN&liff=<action> のPOST。uid はBFFがLINE verify APIで検証済みのLINE userId。
+//   staffIdはクライアントから信用しない（bind以外は常に uid→Sタブ LINE UID列 で解決）。
+//   ⚠ この分岐/セクションを消すと従業員LIFFが全停止する
+// ==========================================================================
+
+function handleLiffApi_(e) {
+  var act = String(e.parameter.liff || '');
+  var body = {};
+  try { body = (e.postData && e.postData.contents) ? JSON.parse(e.postData.contents) : {}; } catch (err) {}
+  var uid = String(body.uid || e.parameter.uid || '').trim();
+  try {
+    if (!uid) return liffJson_({ ok: false, error: 'uid required' });
+    if (act === 'whoami') return liffJson_(liffWhoami_(uid));
+    if (act === 'bind') return liffJson_(liffBind_(uid, String(body.staffId || '')));
+    var staff = staffByLineUid_(uid);
+    if (!staff) return liffJson_({ ok: false, error: 'unbound' });
+    if (act === 'today') return liffJson_(liffToday_(staff));
+    if (act === 'attend') return liffJson_(liffAttend_(staff, body));
+    if (act === 'personal') return liffJson_(liffPersonal_(staff, body.year, body.month));
+    if (act === 'wishlist') return liffJson_(liffWishlist_(staff, body.year, body.month));
+    if (act === 'wish') return liffJson_(liffWish_(staff, body.entries || []));
+    return liffJson_({ ok: false, error: 'unknown liff action' });
+  } catch (err) {
+    try { slackError_('handleLiffApi_(' + act + ')', String(err)); } catch (e2) {}
+    return liffJson_({ ok: false, error: 'server error' });
+  }
+}
+
+function liffJson_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function staffByLineUid_(uid) {
+  if (!uid) return null;
+  var staff = readStaffMaster_();
+  for (var i = 0; i < staff.length; i++) {
+    if (String(staff[i]['LINE UID'] || '').trim() === uid) return staff[i];
+  }
+  return null;
+}
+
+function liffWhoami_(uid) {
+  var staff = staffByLineUid_(uid);
+  if (staff) {
+    return { ok: true, staff: { id: staff['staff_id'], name: staff['氏名'], working: staff['働き方'] || '' } };
+  }
+  // 未紐付け: LINE UID が空の有効スタッフだけを候補に出す
+  var candidates = readStaffMaster_()
+    .filter(function(s) { return !String(s['LINE UID'] || '').trim(); })
+    .map(function(s) { return { id: s['staff_id'], name: s['氏名'] }; });
+  return { ok: true, staff: null, candidates: candidates };
+}
+
+function liffBind_(uid, staffId) {
+  if (!staffId) return { ok: false, error: 'staffId required' };
+  var bound = staffByLineUid_(uid);
+  if (bound) return { ok: true, staff: { id: bound['staff_id'], name: bound['氏名'], working: bound['働き方'] || '' } };
+  var sh = sheet_(SN_STAFF);
+  var rows = sh.getDataRange().getValues();
+  var header = rows[0].map(String);
+  var uidCol = header.indexOf('LINE UID');
+  var nameCol = header.indexOf('氏名');
+  if (uidCol < 0) return { ok: false, error: 'LINE UID列がありません' };
+  for (var r = 1; r < rows.length; r++) {
+    if (String(rows[r][0]) === staffId) {
+      var cur = String(rows[r][uidCol] || '').trim();
+      if (cur && cur !== uid) {
+        return { ok: false, error: 'この名前は既に別のLINEアカウントと連携済みです。心当たりがない場合は管理者にご連絡ください。' };
+      }
+      sh.getRange(r + 1, uidCol + 1).setValue(uid);
+      var name = String(rows[r][nameCol] || '');
+      try { slackPost_('👤 従業員メニュー(LIFF): ' + name + ' (' + staffId + ') がLINE連携しました'); } catch (e2) {}
+      return { ok: true, staff: { id: staffId, name: name, working: '' } };
+    }
+  }
+  return { ok: false, error: 'スタッフが見つかりません' };
+}
+
+function liffToday_(staff) {
+  var today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var mine = readShiftDataRange_(today, today).filter(function(r) {
+    return r.staff_id === staff['staff_id'] && r.shift_status === '出勤' && r.start_time;
+  });
+  mine.sort(function(a, b) { return String(a.start_time).localeCompare(String(b.start_time)); });
+  var target = mine.length ? mine[0] : null;
+  var attendance = null;
+  if (target) {
+    var found = kintaiFindRow_(today, staff['staff_id']);
+    attendance = { response: found ? found.response : '' };
+  }
+  return { ok: true, date: today, name: staff['氏名'],
+    shift: target ? { store: target.store, start: target.start_time, end: target.end_time } : null,
+    attendance: attendance };
+}
+
+function liffAttend_(staff, body) {
+  var today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var date = String(body.date || today);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, error: 'bad date' };
+  var response = String(body.response || '');
+  if (response !== '時間通り' && response !== '遅刻') return { ok: false, error: 'bad response' };
+  var late = parseInt(body.lateMinutes, 10) || 0;
+  var mine = readShiftDataRange_(date, date).filter(function(r) {
+    return r.staff_id === staff['staff_id'] && r.shift_status === '出勤';
+  });
+  if (!mine.length) return { ok: false, error: '対象日の出勤予定がありません' };
+  kintaiRespond_(date, staff['staff_id'], response, response === '遅刻' ? late : 0);
+  return { ok: true, date: date, response: response, lateMinutes: response === '遅刻' ? late : 0 };
+}
+
+function liffPersonal_(staff, year, month) {
+  var y = parseInt(year, 10), mo = parseInt(month, 10);
+  if (!y || !mo || mo < 1 || mo > 12) return { ok: false, error: 'bad year/month' };
+  var m = ('0' + mo).slice(-2);
+  var lastDay = new Date(y, mo, 0).getDate();
+  var firstDate = y + '-' + m + '-01';
+  var lastDate = y + '-' + m + '-' + ('0' + lastDay).slice(-2);
+  var shifts = readShiftDataRange_(firstDate, lastDate).filter(function(r) { return r.staff_id === staff['staff_id']; });
+  var byDate = {};
+  shifts.forEach(function(r) { (byDate[r.date] = byDate[r.date] || []).push(r); });
+  var kintaiByDate = {};
+  var ksh = kintaiSheet_();
+  var klast = ksh.getLastRow();
+  if (klast >= 2) {
+    ksh.getRange(2, 1, klast - 1, KINTAI_HEADERS.length).getValues().forEach(function(kr) {
+      var d = normDateStr_(kr[0]);
+      if (d < firstDate || d > lastDate) return;
+      if (String(kr[1] || '') !== staff['staff_id']) return;
+      var resp = String(kr[7] || '');
+      var late = String(kr[8] || '');
+      kintaiByDate[d] = resp === '遅刻' ? '🕐 遅刻' + late + '分' : resp === '時間通り' ? '🟢 時間通り' : resp === '未応答' ? '⚠ 未応答' : '';
+    });
+  }
+  var days = [];
+  var workDays = 0;
+  for (var day = 1; day <= lastDay; day++) {
+    var dateStr = y + '-' + m + '-' + ('0' + day).slice(-2);
+    var all = byDate[dateStr] || [];
+    var work = all.filter(function(r) { return r.shift_status === '出勤'; });
+    if (work.length) workDays++;
+    days.push({
+      date: dateStr,
+      dow: new Date(y, mo - 1, day).getDay(),
+      shifts: work.map(function(r) { return { store: r.store, start: r.start_time, end: r.end_time }; }),
+      off: !work.length && all.length > 0,
+      kintai: kintaiByDate[dateStr] || ''
+    });
+  }
+  return { ok: true, year: y, month: mo, name: staff['氏名'], days: days, workDays: workDays };
+}
+
+function liffWishlist_(staff, year, month) {
+  var y = parseInt(year, 10), mo = parseInt(month, 10);
+  if (!y || !mo || mo < 1 || mo > 12) return { ok: false, error: 'bad year/month' };
+  var m = ('0' + mo).slice(-2);
+  var lastDay = new Date(y, mo, 0).getDate();
+  var wishes = readWishDataRange_(y + '-' + m + '-01', y + '-' + m + '-' + ('0' + lastDay).slice(-2))
+    .filter(function(r) { return r.staff_id === staff['staff_id']; })
+    .map(function(r) { return { date: r.date, wishType: r.wish_type, start: r.start_time, end: r.end_time }; });
+  return { ok: true, year: y, month: mo, working: staff['働き方'] || '', wishes: wishes };
+}
+
+function liffWish_(staff, entries) {
+  if (!entries || !entries.length) return { ok: false, error: 'no entries' };
+  if (entries.length > 62) return { ok: false, error: 'too many entries' };
+  var n = 0, errs = [];
+  for (var i = 0; i < entries.length; i++) {
+    var en = entries[i] || {};
+    var date = String(en.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { errs.push(date + ': bad date'); continue; }
+    var wt = String(en.wishType || '');
+    if (wt === '出勤') {
+      var st = String(en.start || ''), et = String(en.end || '');
+      if (!st || !et) { errs.push(date + ': 時刻未指定'); continue; }
+      upsertWishData_(date, staff['staff_id'], staff['氏名'], '出勤', st, et, 'liff');
+      updateWishGridCell_(date, staff['氏名'], '出勤', st, et);
+    } else if (wt === '休み希望') {
+      upsertWishData_(date, staff['staff_id'], staff['氏名'], '休み希望', '', '', 'liff');
+      updateWishGridCell_(date, staff['氏名'], '休み希望', '', '');
+    } else {
+      errs.push(date + ': bad wishType');
+      continue;
+    }
+    n++;
+  }
+  return { ok: true, count: n, errors: errs };
 }
