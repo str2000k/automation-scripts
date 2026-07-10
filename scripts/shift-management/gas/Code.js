@@ -1260,13 +1260,14 @@ function kintoneGetAll_(appId, query) {
 // Slack API
 // ==========================================================================
 
-function slackPost_(text, blocks) {
+function slackPost_(text, blocks, linkNames) {
   var token = getProp_('SLACK_BOT_TOKEN');
   var channel = getProp_('SLACK_SHIFT_CHANNEL') || 'C0AKBJ1LTV2';
   if (!token) { Logger.log('[Slack skip] ' + text); return; }
   try {
     var body = { channel: channel, text: text };
     if (blocks) body.blocks = blocks;
+    if (linkNames) body.link_names = true; // 本文中の @mgr 等のグループハンドルをリンク化
     UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
       method: 'post',
       contentType: 'application/json',
@@ -3568,7 +3569,7 @@ function doPost(e) {
         return ContentService.createTextOutput('personal ok');
       }
       if (act === 'setprop') {
-        var allowed = { 'GEMINI_API_KEY': 1, 'ATTEND_NOTIFY_MIN': 1, 'ATTEND_RENOTIFY_MIN': 1, 'ATTEND_ENABLED': 1 };
+        var allowed = { 'GEMINI_API_KEY': 1, 'ATTEND_NOTIFY_MIN': 1, 'ATTEND_RENOTIFY_MIN': 1, 'ATTEND_ENABLED': 1, 'ATTEND_EXCLUDE_STORES': 1 };
         var k = e.parameter.propkey || '';
         if (!allowed[k]) return ContentService.createTextOutput('prop not allowed');
         PropertiesService.getScriptProperties().setProperty(k, e.parameter.propvalue || '');
@@ -3649,6 +3650,28 @@ function doPost(e) {
           }),
         };
         return ContentService.createTextOutput(JSON.stringify(dinfo));
+      }
+      if (act === 'attendtest') {
+        // 検証用: 出勤確認通知のサンプル送信 (cron停止中でもボタン動作込みで試せる)
+        // mode=notice(初回/再通知と同一の見た目・既定) / mode=alert(未応答アラート)
+        var tsid = e.parameter.sid || 'S001';
+        var tEntry = {
+          store: e.parameter.store || '本部オフィス',
+          start_time: e.parameter.start || '18:00',
+          end_time: e.parameter.end || '22:00',
+          staff_name: staffNameById_(tsid),
+        };
+        if (e.parameter.mode === 'alert') {
+          slackPost_('⚠ *出勤確認 未応答* ' + tEntry.staff_name + ' さん (' + tEntry.store + ' ' + tEntry.start_time + '〜) が出勤確認に応答していません');
+          return ContentService.createTextOutput('attendtest(alert) ok');
+        }
+        if (e.parameter.mode === 'mgr') {
+          slackPost_('@mgr ⚠ *出勤確認 未応答* ' + tEntry.staff_name + ' さん (' + tEntry.store + ' ' + tEntry.start_time + '〜) がまだ出勤確認に応答していません', null, true);
+          return ContentService.createTextOutput('attendtest(mgr) ok');
+        }
+        var tdate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+        sendAttendanceNotice_(staffSlackById_(tsid), tsid, tEntry, tdate);
+        return ContentService.createTextOutput('attendtest ok: ' + tsid + ' ' + tEntry.store + ' ' + tEntry.start_time + '〜' + tEntry.end_time);
       }
       if (act === 'legacysync') {
         var lres = legacyShiftSync();
@@ -3939,6 +3962,10 @@ function attendanceCron() {
   var entries = readShiftDataRange_(today, today).filter(function(r) {
     return r.shift_status === '出勤' && r.start_time && r.staff_id;
   });
+  // 出勤確認の対象外店舗 (デフォルト: 本部オフィス。ATTEND_EXCLUDE_STORES でカンマ区切り指定可)
+  var excludeStores = String(getProp_('ATTEND_EXCLUDE_STORES') || '本部オフィス')
+    .split(',').map(function(s) { return s.trim(); }).filter(String);
+  entries = entries.filter(function(r) { return excludeStores.indexOf(r.store) < 0; });
   if (!entries.length) return;
 
   // スタッフごとに最も早い出勤を採用 (複数店舗兼務対応)
@@ -3972,8 +3999,9 @@ function attendanceCron() {
       sh.getRange(sh.getLastRow() + 1, 1, 1, KINTAI_HEADERS.length)
         .setValues([[today, sid, r.staff_name, r.store, r.start_time, nowStr, '', '', '', '', '']]);
     } else if (kint && !kint.response && !kint.renotified_at && diff > 0 && diff <= renotifyMin) {
-      // 再通知
-      sendAttendanceNotice_(slackId, sid, r, today);
+      // 30分前になっても未応答 → 管理者グループ @mgr へ警告 (本人への再通知はしない)
+      slackPost_('@mgr ⚠ *出勤確認 未応答* ' + r.staff_name + ' さん (' + r.store + ' ' + r.start_time
+        + '〜) がまだ出勤確認に応答していません', null, true);
       kintaiSheet_().getRange(kint.row, 7).setValue(nowStr);
     } else if (kint && !kint.response && !kint.alerted && diff <= 0) {
       // 未応答アラート
