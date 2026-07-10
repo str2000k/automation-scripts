@@ -52,6 +52,9 @@ var SN_OUTPUT = 'シフト出力';
 
 var DOW_JP = ['日', '月', '火', '水', '木', '金', '土'];
 
+// 平日の交互シェーディング色 (3シート共通: シフト作成/希望シフト/個人シフト)
+var WEEKDAY_ALT_BG = '#E8EAED';
+
 // Layout constants
 var OUTPUT_HROWS = 3;
 var OUTPUT_DSTART = 4; // 1-indexed first data row
@@ -524,7 +527,7 @@ function loadShiftOutputData_(year, month) {
     var rowColor = weekendColor;
     if (!weekendColor) {
       wdToggle = !wdToggle;
-      rowColor = wdToggle ? '#F1F3F4' : null;
+      rowColor = wdToggle ? WEEKDAY_ALT_BG : null;
     }
     if (rowColor) {
       for (var c = 0; c < OUTPUT_TOTAL_COLS; c++) {
@@ -846,15 +849,20 @@ function loadWishSheetData_(year, month) {
     bgGrid.push(bgRow);
   }
 
-  // Fill dates + weekend colors
+  // Fill dates + weekend colors (平日は1日ごとの交互シェーディング)
+  var wdToggle = false;
   for (var day = 1; day <= lastDay; day++) {
     var d = new Date(parseInt(year), parseInt(month) - 1, day);
     var idx = day - 1;
     grid[idx][0] = (d.getMonth() + 1) + '/' + d.getDate();
     grid[idx][1] = DOW_JP[d.getDay()];
-    var weekendColor = (d.getDay() === 0) ? '#F4C7C3' : (d.getDay() === 6) ? '#B4D7F0' : null;
-    if (weekendColor) {
-      for (var c = 0; c < totalCols; c++) { bgGrid[idx][c] = weekendColor; }
+    var rowColor = (d.getDay() === 0) ? '#F4C7C3' : (d.getDay() === 6) ? '#B4D7F0' : null;
+    if (!rowColor) {
+      wdToggle = !wdToggle;
+      rowColor = wdToggle ? WEEKDAY_ALT_BG : null;
+    }
+    if (rowColor) {
+      for (var c = 0; c < totalCols; c++) { bgGrid[idx][c] = rowColor; }
     }
   }
 
@@ -4299,6 +4307,7 @@ function renderPersonalShift_() {
   var bgs = [];
   var workDays = 0;
   var lateCount = 0, lateMin = 0;
+  var wdToggle = false; // 平日の交互シェーディング
   for (var day = 1; day <= lastDay; day++) {
     var dateStr = year + '-' + m + '-' + ('0' + day).slice(-2);
     var d = new Date(parseInt(year), parseInt(month) - 1, day);
@@ -4306,6 +4315,10 @@ function renderPersonalShift_() {
     var dayShifts = byDate[dateStr] || [];
     var work = dayShifts.filter(function(r) { return r.shift_status === '出勤'; });
     var bg = (d.getDay() === 0) ? '#F4C7C3' : (d.getDay() === 6) ? '#B4D7F0' : '#FFFFFF';
+    if (d.getDay() !== 0 && d.getDay() !== 6) {
+      wdToggle = !wdToggle;
+      if (wdToggle) bg = WEEKDAY_ALT_BG;
+    }
 
     var kint = kintaiByDate[dateStr] || '';
     if (kint.indexOf('遅刻') >= 0) {
