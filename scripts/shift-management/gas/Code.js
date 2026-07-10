@@ -3651,6 +3651,20 @@ function doPost(e) {
         };
         return ContentService.createTextOutput(JSON.stringify(dinfo));
       }
+      if (act === 'wishdebug') {
+        var wsh = sheet_(SN_WISH);
+        var wlast = wsh.getLastColumn();
+        var wnames = wsh.getRange(2, 1, 1, wlast).getValues()[0];
+        var wsubs = wsh.getRange(3, 1, 1, wlast).getValues()[0];
+        var winfo = { lastCol: wlast, pairs: [], fixed: [] };
+        for (var wc = 2; wc < wnames.length; wc++) {
+          var wn = String(wnames[wc]).trim();
+          var wsv = String(wsubs[wc]).trim();
+          if (wn && wsv === '出勤') winfo.pairs.push(wc + ':' + wn);
+          if (wn && wsv === '希望休') winfo.fixed.push(wc + ':' + wn);
+        }
+        return ContentService.createTextOutput(JSON.stringify(winfo));
+      }
       if (act === 'attendtest') {
         // 検証用: 出勤確認通知のサンプル送信 (cron停止中でもボタン動作込みで試せる)
         // mode=notice(初回/再通知と同一の見た目・既定) / mode=alert(未応答アラート)

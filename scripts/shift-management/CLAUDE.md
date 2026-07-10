@@ -36,9 +36,12 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 - 非表示3タブは正本。**削除禁止**。GASが再作成時も自動で非表示にする。
 - gid⇄論理名のマップは `Code.js` の `SN_GID_MAP_`。**タブ追加・作り直し時はここを更新**。
 
-## 3. 主キー原則（変更なし）
+## 3. 主キー原則
 
 - **staff_id**（S001形式）が全処理の不変主キー。staff_name は表示用。
+- ⚠ **2026-07-10 にユーザーが staff_id を全面振り直し**（例: 笠間 S011→S007、加藤 S021→S020、米川 S020→S025）。
+  正本（シフトデータ/希望データ）は同日中に新IDへ移行済み。**以後 staff_id は変更しないこと**
+  （変更すると正本との紐付けが壊れる。過去のkintoneバックアップ等は旧IDのまま）。
 - 確定シフトの一意キー: `staff_id + shift_date + store`。
 - 希望の一意キー: `staff_id + date`（upsert）。
 
