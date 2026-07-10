@@ -507,7 +507,8 @@ function loadShiftOutputData_(year, month) {
     }
   }
 
-  // Fill dates and weekend colors
+  // Fill dates and weekend colors (平日は1日ごとの交互シェーディングで日の境目を見やすく)
+  var wdToggle = false; // 平日のみで交互 (土日はカウントに入れない)
   for (var day = 1; day <= lastDay; day++) {
     var d = new Date(parseInt(year), parseInt(month) - 1, day);
     var nameIdx = (day - 1) * 2;      // grid row index for name row
@@ -518,12 +519,17 @@ function loadShiftOutputData_(year, month) {
     setCell(nameIdx, 3, dateLabel);
     setCell(timeIdx, 3, dow);
 
-    // Weekend background for entire row
+    // Weekend background for entire row / 平日は交互に薄グレー
     var weekendColor = (d.getDay() === 0) ? '#F4C7C3' : (d.getDay() === 6) ? '#B4D7F0' : null;
-    if (weekendColor) {
+    var rowColor = weekendColor;
+    if (!weekendColor) {
+      wdToggle = !wdToggle;
+      rowColor = wdToggle ? '#F1F3F4' : null;
+    }
+    if (rowColor) {
       for (var c = 0; c < OUTPUT_TOTAL_COLS; c++) {
-        bgGrid[nameIdx][c] = weekendColor;
-        bgGrid[timeIdx][c] = weekendColor;
+        bgGrid[nameIdx][c] = rowColor;
+        bgGrid[timeIdx][c] = rowColor;
       }
     }
   }
