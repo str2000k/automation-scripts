@@ -4037,31 +4037,34 @@ function handleSlackInteraction_(payload) {
     return;
   }
 
-  // --- 勤怠: 通常出勤 (元メッセージは変更せず、受付をスレッド返信で通知) ---
+  // --- 勤怠: 通常出勤 (元メッセージは変更せず、受付をスレッド返信で通知。押し直しで修正可) ---
   if (aid === 'att_ok') {
     var p = action.value.split('|');
     if (!attendClickerOk_(payload, p[0], responseUrl)) return;
     var prev = kintaiFindRow_(p[1], p[0]);
-    if (prev && prev.response) {
-      respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false, text: '✅ 既に回答済みです' });
+    if (prev && prev.response === '時間通り') {
+      respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false,
+        text: '✅ 既に「時間通り」で回答済みです' });
       return;
     }
+    var wasResp = prev ? prev.response : '';
+    var wasLate = prev ? prev.late_minutes : '';
     kintaiRespond_(p[1], p[0], '時間通り', 0);
     var origTs = (payload.message && payload.message.ts) || '';
-    slackPost_('🟢 ' + attendMention_(p[0]) + ' 出勤確認を受け付けました。本日もよろしくお願いします！', null, false, origTs);
+    if (wasResp) {
+      slackPost_('🔁 ' + attendMention_(p[0]) + ' 回答を修正: '
+        + wasResp + (wasLate ? ' 約' + wasLate + '分' : '') + ' → 時間通り', null, false, origTs);
+    } else {
+      slackPost_('🟢 ' + attendMention_(p[0]) + ' 出勤確認を受け付けました。本日もよろしくお願いします！', null, false, origTs);
+    }
     return;
   }
 
-  // --- 勤怠: 遅刻 → 分数選択 (本人にだけ見えるドロップダウン・元メッセージは変更しない) ---
+  // --- 勤怠: 遅刻 → 分数選択 (本人にだけ見えるドロップダウン・元メッセージは変更しない。押し直しで修正可) ---
   if (aid === 'att_late') {
     var val = action.value; // staffId|date
     var staffId = val.split('|')[0];
     if (!attendClickerOk_(payload, staffId, responseUrl)) return;
-    var prev2 = kintaiFindRow_(val.split('|')[1], staffId);
-    if (prev2 && prev2.response) {
-      respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false, text: '✅ 既に回答済みです' });
-      return;
-    }
     var origTs2 = (payload.message && payload.message.ts) || '';
     var opts = [];
     for (var mi = 5; mi <= 60; mi += 5) {
@@ -4082,14 +4085,26 @@ function handleSlackInteraction_(payload) {
     return;
   }
 
-  // --- 勤怠: 遅刻分数 (選択後: 一時メッセージを消して結果をスレッド返信) ---
+  // --- 勤怠: 遅刻分数 (選択後: 一時メッセージを消して結果をスレッド返信。押し直しで修正可) ---
   if (aid === 'attmin_select' || aid.indexOf('attmin_') === 0) {
     var v = (action.selected_option && action.selected_option.value) || action.value;
     var p = v.split('|'); // staffId|date|min|origTs
     var staffId = p[0], dateStr = p[1], min = parseInt(p[2], 10) || 0, origTs3 = p[3] || '';
     if (!attendClickerOk_(payload, staffId, responseUrl)) return;
+    var prevL = kintaiFindRow_(dateStr, staffId);
+    if (prevL && prevL.response === '遅刻' && String(min) === prevL.late_minutes) {
+      respondSlack_(responseUrl, { delete_original: true });
+      return; // 同じ内容の押し直しは何もしない
+    }
+    var wasRespL = prevL ? prevL.response : '';
+    var wasLateL = prevL ? prevL.late_minutes : '';
     kintaiRespond_(dateStr, staffId, '遅刻', min);
-    slackPost_('🕐 *遅刻連絡* ' + attendMention_(staffId) + ' 約' + min + '分遅刻で記録しました。気をつけてお越しください。', null, false, origTs3);
+    if (wasRespL) {
+      slackPost_('🔁 ' + attendMention_(staffId) + ' 回答を修正: '
+        + wasRespL + (wasLateL ? ' 約' + wasLateL + '分' : '') + ' → 遅刻 約' + min + '分', null, false, origTs3);
+    } else {
+      slackPost_('🕐 *遅刻連絡* ' + attendMention_(staffId) + ' 約' + min + '分遅刻で記録しました。気をつけてお越しください。', null, false, origTs3);
+    }
     respondSlack_(responseUrl, { delete_original: true });
     return;
   }
@@ -4131,6 +4146,7 @@ function kintaiFindRow_(dateStr, staffId) {
         notified_at: String(vals[i][5] || ''),
         renotified_at: String(vals[i][6] || ''),
         response: String(vals[i][7] || ''),
+        late_minutes: String(vals[i][8] || ''),
         alerted: String(vals[i][10] || ''),
         msg_ts: String(vals[i][11] || ''),
       };
