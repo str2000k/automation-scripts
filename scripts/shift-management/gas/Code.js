@@ -93,8 +93,152 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('シフト勤怠管理')
     .addItem('① マスタ反映', 'syncStaffMaster')
     .addItem('② AIシフト生成', 'generateShift')
-    .addItem('③ Googleカレンダー反映', 'syncConfirmedShift')
+    .addItem('③ 条件チェック', 'checkShiftConditions')
+    .addItem('④ Googleカレンダー反映', 'syncConfirmedShift')
     .addToUi();
+}
+
+// ==========================================================================
+// 条件チェック (メニュー③): シフト作成シートの現状を法律・個人条件・希望と照合
+// ==========================================================================
+
+function checkShiftConditions() {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var ym = getSelectedYearMonth_();
+    if (!ym) { ui.alert('年月セレクター(シフト出力 A1=年/A2=月)を設定してください'); return; }
+    var res = checkShiftConditionsCore_(ym.year, ym.month);
+    var html = '<style>body{font:13px/1.7 -apple-system,sans-serif;margin:12px}h3{margin:10px 0 4px}'
+      + 'li{margin:2px 0}.v{color:#C5221F}.w{color:#B06000}.i{color:#5F6368}</style>';
+    html += '<h3>🚫 違反 (' + res.violations.length + ')</h3>';
+    html += res.violations.length
+      ? '<ul>' + res.violations.map(function(x) { return '<li class="v">' + x + '</li>'; }).join('') + '</ul>'
+      : '<p class="i">なし 🎉</p>';
+    html += '<h3>⚠️ 警告 (' + res.warnings.length + ')</h3>';
+    html += res.warnings.length
+      ? '<ul>' + res.warnings.map(function(x) { return '<li class="w">' + x + '</li>'; }).join('') + '</ul>'
+      : '<p class="i">なし</p>';
+    if (res.info.length) {
+      html += '<h3>ℹ️ 備考</h3><ul>' + res.info.map(function(x) { return '<li class="i">' + x + '</li>'; }).join('') + '</ul>';
+    }
+    html += '<p class="i">※共通ルール(R)・個人ルールの自由記述は自動チェック対象外です</p>';
+    ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(680).setHeight(500),
+      '条件チェック結果 (' + ym.year + '年' + ym.month + '月)');
+  } catch (e) {
+    ui.alert('条件チェックでエラー: ' + e.message);
+  }
+}
+
+// チェック本体 (UIなし。admin=condcheck からも実行可)
+function checkShiftConditionsCore_(year, month) {
+  var m = pad2(parseInt(month, 10));
+  var outputSheet = sheet_(SN_OUTPUT);
+  var staff = readStaffMaster_();
+  var stores = readStoreMaster_();
+  var staffMap = {};
+  var nameToSid = {};
+  staff.forEach(function(s) { staffMap[s['氏名']] = s; nameToSid[s['氏名']] = s['staff_id']; });
+  var nrLayout = readNonRetailLayout_(outputSheet);
+  var lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+  var monthStart = year + '-' + m + '-01';
+  var monthEnd = year + '-' + m + '-' + pad2(lastDay);
+
+  // 希望 (正本タブ・値ゆれを正規化)
+  var wishes = {};
+  readWishDataRange_(monthStart, monthEnd).forEach(function(r) {
+    if (!r.staff_id || !r.date) return;
+    var wt = (r.wish_type === '休み希望' || r.wish_type === '希望休' || r.wish_type === '休み') ? '希望休'
+           : (r.wish_type === '出勤' ? '出勤' : '');
+    if (!wt) return;
+    (wishes[r.staff_id] = wishes[r.staff_id] || {})[r.date] =
+      { shift_type: wt, start_time: r.start_time, end_time: r.end_time };
+  });
+
+  // シート現状 → validator入力形
+  var schedule = [];
+  var entriesByDate = {};
+  var validDates = [];
+  var emptyDays = 0;
+  for (var day = 1; day <= lastDay; day++) {
+    var nameRowNum = OUTPUT_DSTART + (day - 1) * 2;
+    var dateStr = year + '-' + m + '-' + pad2(day);
+    var entries = readDayEntries_(outputSheet, nameRowNum, nameRowNum + 1, dateStr, nameToSid, nrLayout)
+      .filter(function(en) { return en.shift_status === '出勤' && en.staff_name; });
+    if (!entries.length) { emptyDays++; continue; }
+    entriesByDate[dateStr] = entries;
+    validDates.push(dateStr);
+    var storesMap = {}, times = {};
+    entries.forEach(function(en) {
+      if (RETAIL_COLS[en.store]) {
+        if (!storesMap[en.store]) storesMap[en.store] = {};
+        var key = en.shift_type || '応援';
+        while (storesMap[en.store][key]) key += '+';
+        storesMap[en.store][key] = en.staff_name;
+      } else {
+        if (!storesMap[en.store]) storesMap[en.store] = [];
+        storesMap[en.store].push(en.staff_name);
+      }
+      if (en.start_time && en.end_time) times[en.staff_name] = en.start_time + '-' + en.end_time;
+    });
+    schedule.push({ date: dateStr, stores: storesMap, times: times });
+  }
+
+  // 既存バリデータ (早番遅番/最低人数/希望休/対応店舗/36協定/残業偏り)
+  var violations = validateShiftResult_({ schedule: schedule }, staff, stores, wishes, validDates);
+  var warnings = [];
+  var info = [];
+  if (emptyDays) info.push('シフト未作成の日: ' + emptyDays + '日 (チェック対象外)');
+
+  function toMin_(t) {
+    var p = String(t).split(':');
+    return parseInt(p[0], 10) * 60 + parseInt(p[1] || 0, 10);
+  }
+
+  // 追加チェック: 希望時間帯外への配置 / 希望シフトスタッフの希望未提出日への配置
+  validDates.forEach(function(dateStr) {
+    entriesByDate[dateStr].forEach(function(en) {
+      var sid = en.staff_id;
+      var w = sid && wishes[sid] && wishes[sid][dateStr];
+      var md = dateStr.slice(5).replace('-', '/');
+      if (w && w.shift_type === '出勤' && w.start_time && w.end_time && en.start_time && en.end_time) {
+        var ws = toMin_(w.start_time), we = toMin_(w.end_time);
+        var es = toMin_(en.start_time), ee = toMin_(en.end_time);
+        if (we <= ws) we += 1440;
+        if (ee <= es) ee += 1440;
+        if (es < ws || ee > we) {
+          warnings.push(md + ': ' + en.staff_name + ' は希望 ' + w.start_time + '-' + w.end_time
+            + ' に対し ' + en.start_time + '-' + en.end_time + ' で配置');
+        }
+      }
+      var sinfo = staffMap[en.staff_name];
+      if (!w && sinfo && sinfo['働き方'] === '希望シフト') {
+        warnings.push(md + ': ' + en.staff_name + ' (希望シフト) は希望未提出の日に配置');
+      }
+    });
+  });
+
+  // 追加チェック: 連続勤務日数 (7日以上で違反)
+  var workDates = {};
+  validDates.forEach(function(dateStr) {
+    entriesByDate[dateStr].forEach(function(en) {
+      (workDates[en.staff_name] = workDates[en.staff_name] || {})[dateStr] = 1;
+    });
+  });
+  for (var nm in workDates) {
+    var ds = Object.keys(workDates[nm]).sort();
+    var run = 1, best = 1, bestEnd = ds[0];
+    for (var i = 1; i < ds.length; i++) {
+      var prev = new Date(ds[i - 1] + 'T00:00:00');
+      var cur = new Date(ds[i] + 'T00:00:00');
+      run = ((cur - prev) === 86400000) ? run + 1 : 1;
+      if (run > best) { best = run; bestEnd = ds[i]; }
+    }
+    if (best >= 7) {
+      violations.push(nm + ': ' + best + '日連続勤務 (〜' + bestEnd.slice(5).replace('-', '/') + '。労基法上、週1日の休日が必要)');
+    }
+  }
+
+  return { violations: violations, warnings: warnings, info: info };
 }
 
 function debugProperties() {
@@ -1260,23 +1404,27 @@ function kintoneGetAll_(appId, query) {
 // Slack API
 // ==========================================================================
 
-function slackPost_(text, blocks, linkNames) {
+function slackPost_(text, blocks, linkNames, threadTs) {
   var token = getProp_('SLACK_BOT_TOKEN');
   var channel = getProp_('SLACK_SHIFT_CHANNEL') || 'C0AKBJ1LTV2';
-  if (!token) { Logger.log('[Slack skip] ' + text); return; }
+  if (!token) { Logger.log('[Slack skip] ' + text); return ''; }
   try {
     var body = { channel: channel, text: text };
     if (blocks) body.blocks = blocks;
     if (linkNames) body.link_names = true; // 本文中の @mgr 等のグループハンドルをリンク化
-    UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+    if (threadTs) body.thread_ts = threadTs; // スレッド返信 (チャンネルには流さない)
+    var resp = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
       method: 'post',
       contentType: 'application/json',
       headers: { 'Authorization': 'Bearer ' + token },
       payload: JSON.stringify(body),
       muteHttpExceptions: true,
     });
+    var j = JSON.parse(resp.getContentText());
+    return (j && j.ok && j.ts) ? String(j.ts) : '';
   } catch (e) {
     Logger.log('Slack failed: ' + e.message);
+    return '';
   }
 }
 
@@ -3368,7 +3516,7 @@ var SN_WISH_DATA = '希望データ';
 var SN_KINTAI = '勤怠';
 var SN_PERSONAL = '個人シフト';
 var WISH_DATA_HEADERS = ['date', 'staff_id', 'staff_name', 'wish_type', 'start_time', 'end_time', 'channel', 'updated_at'];
-var KINTAI_HEADERS = ['date', 'staff_id', 'staff_name', 'store', 'start_time', 'notified_at', 'renotified_at', 'response', 'late_minutes', 'responded_at', 'alerted'];
+var KINTAI_HEADERS = ['date', 'staff_id', 'staff_name', 'store', 'start_time', 'notified_at', 'renotified_at', 'response', 'late_minutes', 'responded_at', 'alerted', 'msg_ts'];
 
 // --------------------------------------------------------------------------
 // 1) 希望データ (正本タブ)
@@ -3691,6 +3839,28 @@ function doPost(e) {
         sendAttendanceNotice_(staffSlackById_(tsid), tsid, tEntry, tdate);
         return ContentService.createTextOutput('attendtest ok: ' + tsid + ' ' + tEntry.store + ' ' + tEntry.start_time + '〜' + tEntry.end_time);
       }
+      if (act === 'condcheck') {
+        var qy = e.parameter.year || '2026', qm = e.parameter.month || '7';
+        var qr = checkShiftConditionsCore_(qy, qm);
+        return ContentService.createTextOutput(JSON.stringify(qr));
+      }
+      if (act === 'calmonth') {
+        // 指定月のシフトデータ正本 → カレンダーへ一括反映 (初回バックフィル/復旧用)
+        var cy = parseInt(e.parameter.year, 10), cm = parseInt(e.parameter.month, 10);
+        if (!cy || !cm) return ContentService.createTextOutput('year/month required');
+        var cmm = pad2(cm);
+        var clast = new Date(cy, cm, 0).getDate();
+        var cDates = [];
+        for (var cd = 1; cd <= clast; cd++) cDates.push(cy + '-' + cmm + '-' + pad2(cd));
+        var cDel = deleteCalendarEvents_(cDates);
+        var cRows = readShiftDataRange_(cy + '-' + cmm + '-01', cy + '-' + cmm + '-' + pad2(clast));
+        var cEntries = cRows.map(function(o) {
+          return { date: o.date, store: o.store, staff_name: o.staff_name,
+                   start_time: o.start_time, end_time: o.end_time, shift_status: o.shift_status };
+        });
+        var cRes = syncToCalendar_(cEntries, String(cy), false);
+        return ContentService.createTextOutput('calmonth ok: ' + cRes.created + '作成 (事前削除' + cDel.deleted + ')');
+      }
       if (act === 'legacysync') {
         var lres = legacyShiftSync();
         var lt = ensureLegacySyncTrigger_();
@@ -3867,30 +4037,42 @@ function handleSlackInteraction_(payload) {
     return;
   }
 
-  // --- 勤怠: 通常出勤 ---
+  // --- 勤怠: 通常出勤 (元メッセージは変更せず、受付をスレッド返信で通知) ---
   if (aid === 'att_ok') {
     var p = action.value.split('|');
     if (!attendClickerOk_(payload, p[0], responseUrl)) return;
+    var prev = kintaiFindRow_(p[1], p[0]);
+    if (prev && prev.response) {
+      respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false, text: '✅ 既に回答済みです' });
+      return;
+    }
     kintaiRespond_(p[1], p[0], '時間通り', 0);
-    respondSlack_(responseUrl, { replace_original: true,
-      text: '🟢 ' + attendMention_(p[0]) + ' 出勤確認を受け付けました。本日もよろしくお願いします！' });
+    var origTs = (payload.message && payload.message.ts) || '';
+    slackPost_('🟢 ' + attendMention_(p[0]) + ' 出勤確認を受け付けました。本日もよろしくお願いします！', null, false, origTs);
     return;
   }
 
-  // --- 勤怠: 遅刻 → 分数選択 (ドロップダウン・5分刻み) ---
+  // --- 勤怠: 遅刻 → 分数選択 (本人にだけ見えるドロップダウン・元メッセージは変更しない) ---
   if (aid === 'att_late') {
     var val = action.value; // staffId|date
     var staffId = val.split('|')[0];
     if (!attendClickerOk_(payload, staffId, responseUrl)) return;
+    var prev2 = kintaiFindRow_(val.split('|')[1], staffId);
+    if (prev2 && prev2.response) {
+      respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false, text: '✅ 既に回答済みです' });
+      return;
+    }
+    var origTs2 = (payload.message && payload.message.ts) || '';
     var opts = [];
     for (var mi = 5; mi <= 60; mi += 5) {
-      opts.push({ text: { type: 'plain_text', text: mi + '分' }, value: val + '|' + mi });
+      opts.push({ text: { type: 'plain_text', text: mi + '分' }, value: val + '|' + mi + '|' + origTs2 });
     }
     respondSlack_(responseUrl, {
-      replace_original: true,
+      response_type: 'ephemeral',
+      replace_original: false,
       text: 'どのくらい遅れそうですか？',
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: '🕐 ' + attendMention_(staffId) + ' どのくらい遅れそうですか？' } },
+        { type: 'section', text: { type: 'mrkdwn', text: '🕐 どのくらい遅れそうですか？（この表示はあなたにだけ見えています）' } },
         { type: 'actions', block_id: 'attmin_block', elements: [
           { type: 'static_select', placeholder: { type: 'plain_text', text: '遅刻時間を選択' },
             options: opts, action_id: 'attmin_select' },
@@ -3900,15 +4082,15 @@ function handleSlackInteraction_(payload) {
     return;
   }
 
-  // --- 勤怠: 遅刻分数 (ドロップダウン選択。旧ボタン attmin_N も互換受理) ---
+  // --- 勤怠: 遅刻分数 (選択後: 一時メッセージを消して結果をスレッド返信) ---
   if (aid === 'attmin_select' || aid.indexOf('attmin_') === 0) {
     var v = (action.selected_option && action.selected_option.value) || action.value;
-    var p = v.split('|'); // staffId|date|min
-    var staffId = p[0], dateStr = p[1], min = parseInt(p[2], 10) || 0;
+    var p = v.split('|'); // staffId|date|min|origTs
+    var staffId = p[0], dateStr = p[1], min = parseInt(p[2], 10) || 0, origTs3 = p[3] || '';
     if (!attendClickerOk_(payload, staffId, responseUrl)) return;
     kintaiRespond_(dateStr, staffId, '遅刻', min);
-    respondSlack_(responseUrl, { replace_original: true,
-      text: '🕐 *遅刻連絡* ' + attendMention_(staffId) + ' ' + dateStr + ' 約' + min + '分遅刻で記録しました。気をつけてお越しください。' });
+    slackPost_('🕐 *遅刻連絡* ' + attendMention_(staffId) + ' 約' + min + '分遅刻で記録しました。気をつけてお越しください。', null, false, origTs3);
+    respondSlack_(responseUrl, { delete_original: true });
     return;
   }
 
@@ -3924,10 +4106,15 @@ function kintaiSheet_() {
   var sh = ss.getSheetByName(SN_KINTAI);
   if (!sh) {
     sh = ss.insertSheet(SN_KINTAI);
-    sh.getRange('A:K').setNumberFormat('@');
+    sh.getRange('A:L').setNumberFormat('@');
     sh.getRange(1, 1, 1, KINTAI_HEADERS.length).setValues([KINTAI_HEADERS]).setFontWeight('bold');
     sh.setFrozenRows(1);
     try { sh.hideSheet(); } catch (e) {} // 正本タブは非表示運用
+  }
+  // 既存シートに msg_ts 列 (12列目) がなければ追加 (2026-07-11 スレッド警告用)
+  if (!String(sh.getRange(1, 12).getValue())) {
+    sh.getRange('L:L').setNumberFormat('@');
+    sh.getRange(1, 12).setValue('msg_ts').setFontWeight('bold');
   }
   return sh;
 }
@@ -3945,6 +4132,7 @@ function kintaiFindRow_(dateStr, staffId) {
         renotified_at: String(vals[i][6] || ''),
         response: String(vals[i][7] || ''),
         alerted: String(vals[i][10] || ''),
+        msg_ts: String(vals[i][11] || ''),
       };
     }
   }
@@ -3960,7 +4148,7 @@ function kintaiRespond_(dateStr, staffId, response, lateMinutes) {
   } else {
     // 通知前の応答は通常ないが念のため行を作る
     sh.getRange(sh.getLastRow() + 1, 1, 1, KINTAI_HEADERS.length)
-      .setValues([[dateStr, staffId, staffNameById_(staffId), '', '', '', '', response, lateMinutes ? String(lateMinutes) : '', now, '']]);
+      .setValues([[dateStr, staffId, staffNameById_(staffId), '', '', '', '', response, lateMinutes ? String(lateMinutes) : '', now, '', '']]);
   }
 }
 
@@ -4011,19 +4199,20 @@ function attendanceCron() {
     var kint = kintaiFindRow_(today, sid);
 
     if (!kint && diff > 0 && diff <= notifyMin) {
-      // 初回通知 (チャンネル投稿・Slack ID未登録者は氏名表記)
-      sendAttendanceNotice_(slackId, sid, r, today);
+      // 初回通知 (チャンネル投稿・Slack ID未登録者は氏名表記)。tsを保存して警告類はそのスレッドへ
+      var msgTs = sendAttendanceNotice_(slackId, sid, r, today);
       var sh = kintaiSheet_();
       sh.getRange(sh.getLastRow() + 1, 1, 1, KINTAI_HEADERS.length)
-        .setValues([[today, sid, r.staff_name, r.store, r.start_time, nowStr, '', '', '', '', '']]);
+        .setValues([[today, sid, r.staff_name, r.store, r.start_time, nowStr, '', '', '', '', '', msgTs]]);
     } else if (kint && !kint.response && !kint.renotified_at && diff > 0 && diff <= renotifyMin) {
-      // 30分前になっても未応答 → 管理者グループ @mgr へ警告 (本人への再通知はしない)
+      // 30分前になっても未応答 → 出勤確認のスレッドに @mgr 警告 (本人への再通知はしない)
       slackPost_('@mgr ⚠ *出勤確認 未応答* ' + r.staff_name + ' さん (' + r.store + ' ' + r.start_time
-        + '〜) がまだ出勤確認に応答していません', null, true);
+        + '〜) がまだ出勤確認に応答していません', null, true, kint.msg_ts);
       kintaiSheet_().getRange(kint.row, 7).setValue(nowStr);
     } else if (kint && !kint.response && !kint.alerted && diff <= 0) {
-      // 未応答アラート
-      slackPost_('⚠ *出勤確認 未応答* ' + r.staff_name + ' さん (' + r.store + ' ' + r.start_time + '〜) が出勤確認に応答していません');
+      // 未応答アラート (出勤確認のスレッドへ)
+      slackPost_('@mgr ⚠ *出勤確認 未応答* ' + r.staff_name + ' さん (' + r.store + ' ' + r.start_time
+        + '〜) が出勤確認に応答しないまま出勤時刻を過ぎました', null, true, kint.msg_ts);
       var sh2 = kintaiSheet_();
       sh2.getRange(kint.row, 8).setValue('未応答');
       sh2.getRange(kint.row, 11).setValue('yes');
@@ -4031,7 +4220,7 @@ function attendanceCron() {
   }
 }
 
-// 出勤確認は #shift-management チャンネルにメンション付きで投稿 (2026-07-06 DM方式から変更)
+// 出勤確認はチャンネルにメンション付きで投稿 (2026-07-06 DM方式から変更)。戻り値=メッセージts (スレッド警告用)
 function sendAttendanceNotice_(slackId, staffId, entry, dateStr) {
   var mention = slackId ? '<@' + slackId + '>' : entry.staff_name + ' さん';
   var blocks = [
@@ -4042,7 +4231,7 @@ function sendAttendanceNotice_(slackId, staffId, entry, dateStr) {
       { type: 'button', text: { type: 'plain_text', text: '🕐 遅刻' }, style: 'danger', value: staffId + '|' + dateStr, action_id: 'att_late' },
     ] },
   ];
-  slackPost_('【出勤確認】' + dateStr + ' ' + entry.store + ' ' + entry.start_time + '〜', blocks);
+  return slackPost_('【出勤確認】' + dateStr + ' ' + entry.store + ' ' + entry.start_time + '〜', blocks);
 }
 
 // 出勤確認ボタンのメンション表記 (Slack ID未登録者は氏名)
@@ -4051,12 +4240,11 @@ function attendMention_(staffId) {
   return slackId ? '<@' + slackId + '>' : staffNameById_(staffId) + ' さん';
 }
 
-// チャンネル方式のため本人 (または管理者) 以外の操作を拒否
+// チャンネル方式のため本人以外の操作を拒否 (2026-07-11 管理者の例外も廃止)
 function attendClickerOk_(payload, staffId, responseUrl) {
   var clicker = (payload.user && payload.user.id) || '';
   var target = staffSlackById_(staffId);
-  var admin = getProp_('SLACK_ADMIN_ID') || 'U07UBN61QFN';
-  if (target && clicker && clicker !== target && clicker !== admin) {
+  if (target && clicker && clicker !== target) {
     respondSlack_(responseUrl, { response_type: 'ephemeral', replace_original: false,
       text: '⚠ この出勤確認は本人のみ操作できます' });
     return false;
@@ -4197,6 +4385,24 @@ function legacySyncMonth_(year, month, warns) {
   var oldKeys = existing.map(function(o) { return [o.date, o.staff_id, o.store, o.start_time, o.end_time].join('|'); }).sort().join('\n');
   if (newKeys === oldKeys) return '変更なし(' + recs.length + '件)';
 
+  // 変更があった日付を特定 (カレンダー差分反映用)
+  var oldByDate = {}, newByDate = {};
+  existing.forEach(function(o) {
+    (oldByDate[o.date] = oldByDate[o.date] || []).push([o.staff_id, o.store, o.start_time, o.end_time].join('|'));
+  });
+  recs.forEach(function(o) {
+    (newByDate[o.date] = newByDate[o.date] || []).push([o.sid, o.store, o.start, o.end].join('|'));
+  });
+  var changedDates = [];
+  var allD = {};
+  Object.keys(oldByDate).forEach(function(k) { allD[k] = 1; });
+  Object.keys(newByDate).forEach(function(k) { allD[k] = 1; });
+  Object.keys(allD).forEach(function(dt) {
+    var a = (oldByDate[dt] || []).sort().join('\n');
+    var b = (newByDate[dt] || []).sort().join('\n');
+    if (a !== b) changedDates.push(dt);
+  });
+
   // 月全体を入替 (delete → append)
   var dates = [];
   for (var d = 1; d <= lastDay; d++) dates.push(year + '-' + mm + '-' + pad2(d));
@@ -4207,6 +4413,26 @@ function legacySyncMonth_(year, month, warns) {
   });
   var dataSh = shiftDataSheet_();
   dataSh.getRange(dataSh.getLastRow() + 1, 1, out.length, SHIFT_DATA_HEADERS.length).setValues(out);
+
+  // 変更日のカレンダーを更新 ([shift-sync]イベントを削除→再作成。シフトが消えた日は削除のみ)
+  var calMsg = '';
+  try {
+    var emptyDates = changedDates.filter(function(dt) { return !(newByDate[dt] || []).length; });
+    if (emptyDates.length) deleteCalendarEvents_(emptyDates);
+    var calEntries = [];
+    recs.forEach(function(o) {
+      if (changedDates.indexOf(o.date) < 0) return;
+      calEntries.push({ date: o.date, store: o.store, staff_name: o.name,
+                        start_time: o.start, end_time: o.end, shift_status: '出勤' });
+    });
+    if (calEntries.length) {
+      var calRes = syncToCalendar_(calEntries, String(year), true);
+      calMsg = ' cal:' + calRes.created + '作成/' + calRes.deleted + '削除';
+    }
+  } catch (ce) {
+    Logger.log('legacy calendar sync: ' + ce.message);
+    calMsg = ' cal:ERROR';
+  }
 
   // 表示中の月なら再描画
   try {
@@ -4222,7 +4448,7 @@ function legacySyncMonth_(year, month, warns) {
     }
   } catch (e) { Logger.log('legacy rerender: ' + e.message); }
 
-  return recs.length + '件同期';
+  return recs.length + '件同期' + calMsg;
 }
 
 // 名前セルの掃除 (👑や記号・空白を除去して日本語文字のみ残す)
@@ -4462,6 +4688,7 @@ function handleLiffApi_(e) {
   try {
     if (!uid) return liffJson_({ ok: false, error: 'uid required' });
     if (act === 'whoami') return liffJson_(liffWhoami_(uid));
+    if (act === 'home') return liffJson_(liffHome_(uid));
     if (act === 'bind') return liffJson_(liffBind_(uid, String(body.staffId || '')));
     var staff = staffByLineUid_(uid);
     if (!staff) return liffJson_({ ok: false, error: 'unbound' });
@@ -4500,6 +4727,15 @@ function liffWhoami_(uid) {
     .filter(function(s) { return !String(s['LINE UID'] || '').trim(); })
     .map(function(s) { return { id: s['staff_id'], name: s['氏名'] }; });
   return { ok: true, staff: null, candidates: candidates };
+}
+
+// whoami+today を1レスポンスで返す（LIFF起動時の往復削減用）。
+// 未紐付けなら whoami 相当（candidates付き）を返す。
+function liffHome_(uid) {
+  var w = liffWhoami_(uid);
+  if (!w.staff) return w;
+  var staff = staffByLineUid_(uid);
+  return { ok: true, staff: w.staff, today: liffToday_(staff) };
 }
 
 function liffBind_(uid, staffId) {
