@@ -3832,7 +3832,7 @@ function doPost(e) {
           return ContentService.createTextOutput('attendtest(alert) ok');
         }
         if (e.parameter.mode === 'mgr') {
-          slackPost_('@mgr ⚠ *出勤確認 未応答* ' + tEntry.staff_name + ' さん (' + tEntry.store + ' ' + tEntry.start_time + '〜) がまだ出勤確認に応答していません', null, true);
+          slackPost_('@mgr ⚠ *出勤確認 未応答* ' + attendMention_(tsid) + ' (' + tEntry.store + ' ' + tEntry.start_time + '〜) がまだ出勤確認に応答していません。ボタンから回答してください', null, true);
           return ContentService.createTextOutput('attendtest(mgr) ok');
         }
         var tdate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
@@ -4225,13 +4225,15 @@ function attendanceCron() {
       sh.getRange(sh.getLastRow() + 1, 1, 1, KINTAI_HEADERS.length)
         .setValues([[today, sid, r.staff_name, r.store, r.start_time, nowStr, '', '', '', '', '', msgTs]]);
     } else if (kint && !kint.response && !kint.renotified_at && diff > 0 && diff <= renotifyMin) {
-      // 30分前になっても未応答 → 出勤確認のスレッドに @mgr 警告 (本人への再通知はしない)
-      slackPost_('@mgr ⚠ *出勤確認 未応答* ' + r.staff_name + ' さん (' + r.store + ' ' + r.start_time
-        + '〜) がまだ出勤確認に応答していません', null, true, kint.msg_ts);
+      // 30分前になっても未応答 → 出勤確認のスレッドに @mgr + 本人メンションで警告
+      var who = slackId ? '<@' + slackId + '>' : r.staff_name + ' さん';
+      slackPost_('@mgr ⚠ *出勤確認 未応答* ' + who + ' (' + r.store + ' ' + r.start_time
+        + '〜) がまだ出勤確認に応答していません。ボタンから回答してください', null, true, kint.msg_ts);
       kintaiSheet_().getRange(kint.row, 7).setValue(nowStr);
     } else if (kint && !kint.response && !kint.alerted && diff <= 0) {
-      // 未応答アラート (出勤確認のスレッドへ)
-      slackPost_('@mgr ⚠ *出勤確認 未応答* ' + r.staff_name + ' さん (' + r.store + ' ' + r.start_time
+      // 未応答アラート (出勤確認のスレッドへ・@mgr + 本人メンション)
+      var who2 = slackId ? '<@' + slackId + '>' : r.staff_name + ' さん';
+      slackPost_('@mgr ⚠ *出勤確認 未応答* ' + who2 + ' (' + r.store + ' ' + r.start_time
         + '〜) が出勤確認に応答しないまま出勤時刻を過ぎました', null, true, kint.msg_ts);
       var sh2 = kintaiSheet_();
       sh2.getRange(kint.row, 8).setValue('未応答');
