@@ -4057,6 +4057,8 @@ function handleSlackInteraction_(payload) {
     } else {
       slackPost_('🟢 ' + attendMention_(p[0]) + ' 出勤確認を受け付けました。本日もよろしくお願いします！', null, false, origTs);
     }
+    attendUpdateStatus_(origTs, '✅ 回答済み: 🟢 時間通り ('
+      + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'HH:mm') + ')');
     return;
   }
 
@@ -4105,6 +4107,8 @@ function handleSlackInteraction_(payload) {
     } else {
       slackPost_('🕐 *遅刻連絡* ' + attendMention_(staffId) + ' 約' + min + '分遅刻で記録しました。気をつけてお越しください。', null, false, origTs3);
     }
+    attendUpdateStatus_(origTs3, '✅ 回答済み: 🕐 遅刻 約' + min + '分 ('
+      + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'HH:mm') + ')');
     respondSlack_(responseUrl, { delete_original: true });
     return;
   }
@@ -4254,6 +4258,32 @@ function sendAttendanceNotice_(slackId, staffId, entry, dateStr) {
 function attendMention_(staffId) {
   var slackId = staffSlackById_(staffId);
   return slackId ? '<@' + slackId + '>' : staffNameById_(staffId) + ' さん';
+}
+
+// 出勤確認メッセージに回答状況の行を追記/更新 (ボタンは残す。修正時は行を書き換え)
+function attendUpdateStatus_(ts, statusText) {
+  if (!ts) return;
+  var token = getProp_('SLACK_BOT_TOKEN');
+  var channel = getProp_('SLACK_SHIFT_CHANNEL') || 'C0AKBJ1LTV2';
+  if (!token) return;
+  try {
+    var resp = UrlFetchApp.fetch(
+      'https://slack.com/api/conversations.history?channel=' + encodeURIComponent(channel)
+        + '&latest=' + encodeURIComponent(ts) + '&inclusive=true&limit=1',
+      { headers: { 'Authorization': 'Bearer ' + token }, muteHttpExceptions: true });
+    var j = JSON.parse(resp.getContentText());
+    var msg = (j.messages || [])[0];
+    if (!msg || msg.ts !== ts || !msg.blocks) return;
+    var blocks = msg.blocks.filter(function(b) { return b.block_id !== 'att_status'; });
+    blocks.push({ type: 'context', block_id: 'att_status',
+      elements: [{ type: 'mrkdwn', text: statusText }] });
+    UrlFetchApp.fetch('https://slack.com/api/chat.update', {
+      method: 'post', contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + token },
+      payload: JSON.stringify({ channel: channel, ts: ts, text: msg.text || '出勤確認', blocks: blocks }),
+      muteHttpExceptions: true,
+    });
+  } catch (e) { Logger.log('attendUpdateStatus_: ' + e.message); }
 }
 
 // チャンネル方式のため本人以外の操作を拒否 (2026-07-11 管理者の例外も廃止)
