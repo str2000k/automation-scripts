@@ -87,6 +87,16 @@ Cloud Run `shift-bolt-server`、launchd 4本、GHA shift-*.yml 3本、LINE/LIFF/
 - **⚠ doPost内の `e.parameter.liff` 分岐とこのセクションを消すと従業員LIFFが全停止する**
 - uid→スタッフ解決は Sタブ `LINE UID` 列。staff_id はクライアントから信用しない
 
+### 公式LINE案内DMの自動送信 (p11・2026-07-12追加)
+
+- Sタブ「Slack ID」列(N=14)に**空→値**の新規入力があると、onEditTrigger が有効スタッフに限り
+  公式LINE「Chillaxy BackOffice」案内DMを **Backoffice bot** から自動送信（`autoSendLineInviteOnStaffEdit_`→`sendLineInviteDM_`）
+- 既存値の修正(oldValueあり)・無効フラグ・氏名/ID欠落はスキップ。onEditはUI手動編集でのみ発火（API書込では発火しない）
+- Script Properties: `BACKOFFICE_BOT_TOKEN`（p10支払い通知と同じ backoffice_bot の xoxb）/ `STAFF_INVITE_CODE`（BFF側と同値・二重管理）
+  - 設定は `admin=setinvite`（POSTボディ `{invite, botToken}`・URLログ回避）。招待コードのローテートは **BFF側 STAFF_INVITE_CODE と p7 側の2箇所**同時更新が必要
+- 保守: `admin=lineinvite&row=N` で指定行に手動再送（onEditと同経路・token保護下）
+- 文面は `lineInviteText_`（登録手順＋機能一覧＋招待コード）。⚠ この関数/onEdit分岐を消すと自動案内が停止
+
 ## 6. Script Properties（必須キー）
 
 `GEMINI_API_KEY` / `SLACK_BOT_TOKEN` / `SLACK_SHIFT_CHANNEL` / `SHIFT_CALENDAR_ID` / `WEBHOOK_TOKEN`

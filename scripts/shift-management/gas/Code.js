@@ -563,6 +563,17 @@ function onEditTrigger(e) {
     return;
   }
 
+  // スタッフマスタ: Slack ID列(N=14)に「空→値」の新規入力があれば公式LINE案内DMを自動送信 (p11連携)
+  // 既存値の修正(oldValueあり)や無効スタッフはスキップ。DMは Backoffice bot から。
+  if (name === SN_STAFF && col === STAFF_SLACKID_COL && row >= 2) {
+    var newSid = String(e.range.getValue()).trim();
+    var oldSid = String(e.oldValue == null ? '' : e.oldValue).trim();
+    if (newSid && !oldSid) {
+      try { autoSendLineInviteOnStaffEdit_(sheet, row); } catch (le) { Logger.log('line invite: ' + le.message); }
+    }
+    return;
+  }
+
   // 店舗マスタ: 勤務開始で×→勤務終了も× (F=col6, G=col7)
   if (name === SN_STORE && row >= 2 && (col === 6 || col === 7)) {
     var val = String(e.range.getValue()).trim();
@@ -1426,6 +1437,68 @@ function slackPost_(text, blocks, linkNames, threadTs) {
     Logger.log('Slack failed: ' + e.message);
     return '';
   }
+}
+
+// ==========================================================================
+// 公式LINE案内DM (p11連携)。Sタブ Slack ID列に新規入力→ Backoffice bot からDM自動送信。
+// STAFF_INVITE_CODE / BACKOFFICE_BOT_TOKEN は Script Properties (admin=setinvite で設定)。
+// ==========================================================================
+var STAFF_SLACKID_COL = 14; // Sタブ「Slack ID」列 (A=1 起点。O=15 は LINE UID)
+
+function lineInviteText_(name) {
+  var code = getProp_('STAFF_INVITE_CODE');
+  return name + 'さん、お疲れさまです！\n' +
+    'CHILLAXY公式LINE「Chillaxy BackOffice」のご案内です📱\n\n' +
+    'シフト確認・希望提出・出勤確認・日報などがスマホのLINEから使えるようになりました。\n' +
+    '以下の手順で初回登録をお願いします👇\n\n' +
+    '*【登録手順】*\n' +
+    '1️⃣ 公式LINEを友だち追加\n' +
+    '　https://line.me/R/ti/p/@461hkewy\n' +
+    '2️⃣ 下部メニュー「従業員の方」をタップ\n' +
+    '3️⃣ 招待コードを入力：*' + code + '*\n' +
+    '4️⃣ 一覧からご自身の名前を選び「この名前で始める」→完了！\n' +
+    '　（次回からは自動でホームが開きます）\n\n' +
+    '*【LINEでできること】*\n' +
+    '📅 シフト確認（確定シフト・勤怠）\n' +
+    '✍️ 希望シフト提出（出勤希望・休み希望）\n' +
+    '✅ 出勤確認（当日出勤があればホームで「時間通り/遅刻」を報告）\n' +
+    '📝 日報の記入・提出\n' +
+    '💴 現金出納帳の明細追加\n' +
+    '🗓️ 週次レポート／📊 月次レポート\n' +
+    '🚃 交通費・経費申請（MFクラウド経費）／💰 給与明細（MFクラウド給与）\n\n' +
+    '⚠️ 招待コードは社外秘です。第三者への共有はお控えください。\n' +
+    'ご不明点はこのDMかサトルまで🙇';
+}
+
+// Backoffice bot で指定 Slack ユーザーへ案内DMを送る。{ok:bool, error:str}
+function sendLineInviteDM_(slackId, name) {
+  var token = getProp_('BACKOFFICE_BOT_TOKEN');
+  if (!token) { Logger.log('BACKOFFICE_BOT_TOKEN未設定'); return { ok: false, error: 'no token' }; }
+  if (!slackId) return { ok: false, error: 'no slackId' };
+  try {
+    var resp = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+      method: 'post', contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + token },
+      payload: JSON.stringify({ channel: slackId, text: lineInviteText_(name) }),
+      muteHttpExceptions: true,
+    });
+    var j = JSON.parse(resp.getContentText());
+    return { ok: !!(j && j.ok), error: (j && j.error) || '' };
+  } catch (e) {
+    Logger.log('sendLineInviteDM_ failed: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// onEdit から: 有効スタッフの行に限り案内DMを送る。
+function autoSendLineInviteOnStaffEdit_(sheet, row) {
+  var active = String(sheet.getRange(row, 3).getValue()).trim(); // C=有効フラグ
+  if (active !== '有効') return;
+  var name = String(sheet.getRange(row, 2).getValue()).trim();    // B=氏名
+  var slackId = String(sheet.getRange(row, STAFF_SLACKID_COL).getValue()).trim();
+  if (!name || !slackId) return;
+  var r = sendLineInviteDM_(slackId, name);
+  Logger.log('LINE案内DM auto: ' + name + ' (' + slackId + ') ok=' + r.ok + ' ' + r.error);
 }
 
 function slackError_(location, msg) {
@@ -3726,6 +3799,24 @@ function doPost(e) {
         if (!allowed[k]) return ContentService.createTextOutput('prop not allowed');
         PropertiesService.getScriptProperties().setProperty(k, e.parameter.propvalue || '');
         return ContentService.createTextOutput('setprop ok: ' + k);
+      }
+      if (act === 'setinvite') {
+        // p11: STAFF_INVITE_CODE / BACKOFFICE_BOT_TOKEN を POSTボディ経由で設定 (URLログ回避)
+        var pb = {};
+        try { pb = JSON.parse((e.postData && e.postData.contents) || '{}'); } catch (pe) {}
+        var sp = PropertiesService.getScriptProperties();
+        var setKeys = [];
+        if (pb.invite) { sp.setProperty('STAFF_INVITE_CODE', String(pb.invite)); setKeys.push('STAFF_INVITE_CODE'); }
+        if (pb.botToken) { sp.setProperty('BACKOFFICE_BOT_TOKEN', String(pb.botToken)); setKeys.push('BACKOFFICE_BOT_TOKEN'); }
+        return ContentService.createTextOutput('setinvite ok: ' + setKeys.join(','));
+      }
+      if (act === 'lineinvite') {
+        // 保守用: Sタブの指定行(row)に対し onEdit と同じ自動送信経路を実行 (再送/検証用)
+        var lrow = parseInt(e.parameter.row, 10) || 0;
+        if (lrow < 2) return ContentService.createTextOutput('row required (>=2)');
+        var lsh = sheet_(SN_STAFF);
+        autoSendLineInviteOnStaffEdit_(lsh, lrow);
+        return ContentService.createTextOutput('lineinvite done: row=' + lrow);
       }
       if (act === 'staffsync') {
         var staff = readStaffMaster_();
